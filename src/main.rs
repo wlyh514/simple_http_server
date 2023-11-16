@@ -7,6 +7,8 @@ use std::{
     time::Duration,
     vec, collections::VecDeque,
 };
+pub mod http;
+pub mod http2;
 
 type ResponseQueue = VecDeque<JoinHandle<String>>;
 
