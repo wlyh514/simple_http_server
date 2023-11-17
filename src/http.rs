@@ -1,5 +1,3 @@
 use std::collections::HashMap;
 
-pub type Headers = HashMap<String, String>;
-
-
+pub type HeadersMap = HashMap<String, String>;
