@@ -11,7 +11,7 @@ impl Connection {
         Connection {
             tcp_stream,
             settings: SettingsMap::new(),
-            stream_counter: 0,
+            stream_counter: 1,
         }
     }
 
