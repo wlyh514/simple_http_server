@@ -1,18 +1,13 @@
+use std::io::Read;
 use ::std::{io::BufReader, net::TcpStream};
 
 use ::bitflags::bitflags;
-use ::bytes::{BufMut, Bytes, BytesMut};
+use ::bytes::{BufMut, Bytes, BytesMut, Buf};
+use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
 use super::connection::Settings;
 use crate::http::HeadersMap;
 
-fn compress_headers(headers: HeadersMap) -> Bytes {
-    // TODO: Implement this
-}
-
-fn decompress_headers(header_block: Bytes) -> HeadersMap {
-    // TODO: Implement this
-}
 
 bitflags! {
     struct DataFlags: u8 {
@@ -46,9 +41,16 @@ bitflags! {
 }
 
 struct H2HeadersMap(HeadersMap);
-impl Into<Bytes> for H2HeadersMap {
-    fn into(self) -> Bytes {
-        compress_headers(self.0)
+impl TryInto<Bytes> for H2HeadersMap {
+    type Error = ();
+    fn try_into(self) -> Result<Bytes, Self::Error> {
+        // TODO: Implement header block compression
+    }
+}
+impl TryFrom<Bytes> for H2HeadersMap {
+    type Error = ();
+    fn try_from(value: Bytes) -> Result<Self, Self::Error> {
+        // TODO: Implement header block decompression
     }
 }
 impl H2HeadersMap {
@@ -79,9 +81,25 @@ impl FrameHeader {
         buf.put_u32(self.stream_id & 0x7fff_ffff);
     }
 }
+impl TryFrom<Bytes> for FrameHeader {
+    type Error = &'static str;
+
+    fn try_from(mut buf: Bytes) -> Result<Self, Self::Error> {
+        assert!(buf.len() >= 9);
+        let length: usize = ((buf.get_u8() << 16) | (buf.get_u8() << 8) | buf.get_u8()).into();
+        let frame_type = buf.get_u8(); 
+        let flags = buf.get_u8();
+        let stream_id = buf.get_u32() & 0x7fff_ffff;
+        
+        if frame_type > 0x9 {
+            return Err(format!("Unsupported type: {}", frame_type).as_str())
+        }
+
+        Ok(Self {length, frame_type, flags, stream_id})
+    }
+}
 
 /// See RFC7540 section 6
-#[repr(u8)]
 enum FrameBody {
     Data {
         pad_length: usize,
@@ -96,7 +114,7 @@ enum FrameBody {
     },
     Priority {
         e: bool,
-        stream_pri: u32,
+        stream_dep: u32,
         weight: u8,
     },
     RstStream {
@@ -142,17 +160,53 @@ impl FrameBody {
         }
     }
 
-    fn size(self) -> usize {
-        // TODO: Implement this
-        0
+    /// Errors if hdr_block_frag failed to compress
+    fn try_size(self) -> Result<usize, &'static str> {
+        match self {
+            Self::Data { pad_length, data } => {
+                Ok(8 + data.len() + pad_length)
+            },
+            Self::Headers { pad_length, hdr_block_frag, ..} => {
+                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
+                Ok(8 + 32 + 8 + hdr_block_frag_bytes.len() + pad_length)
+            },
+            Self::Priority { .. } => {
+                Ok(32 + 8)
+            },
+            Self::RstStream { .. } => {
+                Ok(32)
+            },
+            Self::Settings { .. } => {
+                Ok(16 + 32)
+            },
+            Self::PushPromise { pad_length, hdr_block_frag, .. } => {
+                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
+                Ok(8 + 32 + hdr_block_frag_bytes.len() + pad_length)
+            },
+            Self::Ping { .. } => {
+                Ok(64)
+            },
+            Self::GoAway { additional_debug_data, .. } => {
+                Ok(32 + 32 + additional_debug_data.len())
+            },
+            Self::WindowUpdate { .. } => {
+                Ok(32)
+            },
+            Self::Continuation { hdr_block_frag } => {
+                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
+                Ok(hdr_block_frag_bytes.len())
+            }
+        }
     }
 
-    fn put_buf(self, mut buf: BytesMut) {
+    /// Serialization
+    fn put_buf(self, mut buf: BytesMut) -> Result<(), &'static str> {
         match self {
             Self::Data { pad_length, data } => {
                 buf.put_u8(pad_length.try_into().unwrap());
                 buf.put(data);
                 buf.put_bytes(0, pad_length);
+                Ok(())
             }
             Self::Headers {
                 pad_length,
@@ -161,7 +215,7 @@ impl FrameBody {
                 weight,
                 hdr_block_frag,
             } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.into();
+                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
                 buf.put_u8(pad_length.try_into().unwrap());
                 buf.put_u32(if e {
                     stream_dep | 0x8000_0000
@@ -171,10 +225,11 @@ impl FrameBody {
                 buf.put_u8(weight);
                 buf.put(hdr_block_frag_bytes);
                 buf.put_bytes(0, pad_length);
+                Ok(())
             }
             Self::Priority {
                 e,
-                stream_pri,
+                stream_dep: stream_pri,
                 weight,
             } => {
                 buf.put_u32(if e {
@@ -183,27 +238,32 @@ impl FrameBody {
                     stream_pri
                 });
                 buf.put_u8(weight.try_into().unwrap());
+                Ok(())
             }
             Self::RstStream { error_code } => {
                 buf.put_u32(error_code as u32);
+                Ok(())
             }
             Self::Settings { identifier, value } => {
                 buf.put_u16(identifier as u16);
                 buf.put_u32(value);
+                Ok(())
             }
             Self::PushPromise {
                 pad_length,
                 promised_stream_id,
                 hdr_block_frag,
             } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.into();
+                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
                 buf.put_u8(pad_length.try_into().unwrap());
                 buf.put_u32(promised_stream_id & 0x7fff_ffff);
                 buf.put(hdr_block_frag_bytes);
                 buf.put_bytes(0, pad_length);
+                Ok(())
             }
             Self::Ping { data, .. } => {
                 buf.put(data);
+                Ok(())
             }
             Self::GoAway {
                 last_stream_id,
@@ -213,16 +273,90 @@ impl FrameBody {
                 buf.put_u32(last_stream_id & 0x7fff_ffff);
                 buf.put_u32(error_code as u32);
                 buf.put(additional_debug_data);
+                Ok(())
             }
             Self::WindowUpdate {
                 window_size_increment,
             } => {
                 buf.put_u32(window_size_increment & 0x7fff_ffff);
+                Ok(())
             }
             Self::Continuation { hdr_block_frag } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.into();
+                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
                 buf.put(hdr_block_frag_bytes);
+                Ok(())
             }
+        }
+    }
+
+    /// Deserialization
+    fn try_from_buf(mut buf: Bytes, hdr: &FrameHeader) -> Result<Self, &'static str> {
+        match hdr.frame_type {
+            0x0 => {
+                let pad_length: usize = buf.get_u8().into();
+                let data_length = hdr.length - 8 - pad_length;
+                let data = buf.slice(..data_length);
+                Ok(Self::Data { pad_length, data })
+            }, 
+            0x1 => {
+                let pad_length: usize = buf.get_u8().into(); 
+
+                let stream_dep = buf.get_u32();
+                let e: bool = (stream_dep & 0x8000_0000) > 0;
+                let stream_dep = stream_dep * 0x7fff_ffff;
+
+                let weight = buf.get_u8();
+
+                let hdr_block_frag_len = hdr.length - 8 - 32 - 8 - pad_length;
+                let hdr_block_frag_bytes = buf.slice(..hdr_block_frag_len);
+                let hdr_block_frag = H2HeadersMap::try_from(hdr_block_frag_bytes).map_err(|_| "Error decompressing header")?;
+                Ok(Self::Headers { pad_length, e, stream_dep, weight, hdr_block_frag })
+            }, 
+            0x2 => {
+                let stream_dep = buf.get_u32();
+                let e: bool = (stream_dep & 0x8000_0000) > 0;
+                let stream_dep = stream_dep * 0x7fff_ffff;
+
+                let weight = buf.get_u8();
+                Ok(Self::Priority { e, stream_dep, weight })
+            },
+            0x3 => {
+                let error_code = buf.get_u32(); 
+                let error_code: ErrorCodes = error_code.try_into().map_err(|_| "Unknown error code")?;
+                Ok(Self::RstStream { error_code })
+            },
+            0x4 => {
+                let identifier: Settings = buf.get_u16().try_into().map_err(|_| "Unknown settings identifier")?;
+
+                let value = buf.get_u32(); 
+                Ok(Self::Settings { identifier, value })
+            },
+            0x5 => {
+                let pad_length: usize = buf.get_u8().into(); 
+                let promised_stream_id = buf.get_u32() & 0x7fff_ffff;
+                let hdr_block_frag_bytes = buf.slice(..(hdr.length - 8 - 32 - pad_length));
+                let hdr_block_frag = H2HeadersMap::try_from(hdr_block_frag_bytes).map_err(|_| "Error decompressing header")?;
+                Ok(Self::PushPromise { pad_length, promised_stream_id, hdr_block_frag})
+            },
+            0x6 => {
+                let data = buf.slice(..64);
+                Ok(Self::Ping { data })
+            },
+            0x7 => {
+                let last_stream_id = buf.get_u32() & 0x7fff_ffff;
+                let error_code: ErrorCodes = buf.get_u32().try_into().map_err(|_| "Unknown error code")?;
+                let additional_debug_data = buf.slice(..(hdr.length - 32 - 32));
+                Ok(Self::GoAway { last_stream_id, error_code, additional_debug_data })
+            },
+            0x8 => {
+                let window_size_increment = buf.get_u32() & 0x7fff_ffff;
+                Ok(Self::WindowUpdate { window_size_increment })
+            },
+            0x9 => {
+                let hdr_block_frag: H2HeadersMap = buf.slice(..hdr.length).try_into().map_err(|_| "Error decompressing header")?;
+                Ok(Self::Continuation { hdr_block_frag })
+            },
+            _ => Err("Unknown frame type")
         }
     }
 }
@@ -232,9 +366,9 @@ pub struct Frame {
     payload: FrameBody,
 }
 impl Frame {
-    pub fn new(stream_id: u32, payload: FrameBody, flags: u8) -> Self {
-        let body_size = payload.size();
-        Self {
+    pub fn new(stream_id: u32, payload: FrameBody, flags: u8) -> Result<Self, &'static str> {
+        let body_size = payload.try_size()?;
+        Ok(Self {
             header: FrameHeader {
                 length: body_size,
                 frame_type: payload.to_id(),
@@ -242,16 +376,35 @@ impl Frame {
                 stream_id,
             },
             payload,
-        }
+        })
     }
 
+    /// A frame must be verified before serialized and sent. 
     pub fn validate(self) -> Result<(), &'static str> {
-        // TODO: Implement this
+        let payload_len = self.payload.try_size()?;
+        if payload_len != self.header.length {
+            return Err("Incorrect FrameHeader.length")
+        }
+
+        // TODO: Check for unsupported header
+
+        // TODO: Get a better name for this fn
         Ok(())
     }
 
-    pub fn read_from_buf(buf_reader: BufReader<TcpStream>) -> Frame {
+    pub fn try_read_from_buf(mut buf_reader: BufReader<TcpStream>) -> Result<Frame, &'static str> {
+        let mut header_buf = BytesMut::with_capacity(9);
         // Read frame header
+        buf_reader.read_exact(&mut header_buf);
+        let mut header_buf: Bytes = header_buf.into();
+        let header = FrameHeader::try_from(header_buf)?;
+
+        let mut payload_buf = BytesMut::with_capacity(header.length);
+        buf_reader.read_exact(&mut payload_buf);
+        let mut payload_buf: Bytes = payload_buf.into();
+        
+        let payload = FrameBody::try_from_buf(payload_buf, &header)?;
+        Ok(Self { header, payload })
     }
 }
 impl Into<Bytes> for Frame {
@@ -263,6 +416,7 @@ impl Into<Bytes> for Frame {
     }
 }
 
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u32)]
 enum ErrorCodes {
     NoError = 0x0,

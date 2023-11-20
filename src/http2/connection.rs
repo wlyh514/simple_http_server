@@ -1,5 +1,7 @@
+use ::num_enum::{TryFromPrimitive, IntoPrimitive}
+
 use super::{frames::Frame, stream::Stream};
-use std::{collections::HashMap, net::TcpStream};
+use ::std::{collections::HashMap, net::TcpStream};
 
 pub struct Connection {
     tcp_stream: TcpStream,
@@ -26,6 +28,7 @@ impl Connection {
 
 /// See RFC7540 section 6.5
 #[repr(u16)]
+#[derive(TryFromPrimitive, IntoPrimitive, Eq, PartialEq, Debug)]
 pub enum Settings {
     HeaderTableSize = 0x1,
     EnablePush = 0x2,
