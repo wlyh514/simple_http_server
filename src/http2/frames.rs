@@ -200,7 +200,7 @@ impl FrameBody {
     }
 
     /// Serialization
-    fn put_buf(self, mut buf: BytesMut) -> Result<(), &'static str> {
+    fn try_put_buf(self, mut buf: BytesMut) -> Result<(), &'static str> {
         match self {
             Self::Data { pad_length, data } => {
                 buf.put_u8(pad_length.try_into().unwrap());
@@ -392,6 +392,7 @@ impl Frame {
         Ok(())
     }
 
+    /// Deserialization
     pub fn try_read_from_buf(mut buf_reader: BufReader<TcpStream>) -> Result<Frame, &'static str> {
         let mut header_buf = BytesMut::with_capacity(9);
         // Read frame header
@@ -407,12 +408,15 @@ impl Frame {
         Ok(Self { header, payload })
     }
 }
-impl Into<Bytes> for Frame {
-    fn into(self) -> Bytes {
+/// Serialization
+impl TryInto<Bytes> for Frame {
+    type Error = &'static str;
+
+    fn try_into(self) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::with_capacity(FRAME_HDR_SIZE + self.header.length);
         self.header.put_buf(buf);
-        self.payload.put_buf(buf);
-        buf.into()
+        self.payload.try_put_buf(buf)?;
+        Ok(buf.into())
     }
 }
 
