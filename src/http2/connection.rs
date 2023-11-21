@@ -1,4 +1,4 @@
-use ::num_enum::{TryFromPrimitive, IntoPrimitive}
+use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
 use super::{frames::Frame, stream::Stream};
 use ::std::{collections::HashMap, net::TcpStream};
@@ -17,11 +17,11 @@ impl Connection {
         }
     }
 
-    pub fn new_stream() -> Stream {
+    pub fn new_stream(self) -> Stream {
         // TODO: Implement this
     }
 
-    pub fn read_frame() -> Frame {
+    pub fn read_frame(self) -> Frame {
         // TODO: Implement this
     }
 }
