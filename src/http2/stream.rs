@@ -4,7 +4,7 @@ use bytes::{BytesMut, Bytes};
 
 use crate::http::{HTTPRequest, HeadersMap};
 
-use super::frames::{Frame, FrameBody, HeadersFlags};
+use super::frames::{Frame, FrameBody, HeadersFlags, ContinuationFlags, DataFlags};
 
 pub struct Stream {
     id: i32,
@@ -72,17 +72,67 @@ impl Stream {
                         FrameBody::Continuation { hdr_block_frag } => {
                             hdr_block.extend_from_slice(&hdr_block_frag);
 
-                            
-                            state
+                            let frame_flags: ContinuationFlags = ContinuationFlags::from_bits_retain(frame.header.flags); 
+
+                            if frame_flags.contains(ContinuationFlags::END_HEADERS) {
+                                ReqAssemblerState::ReadingBody
+                            } else {
+                                state
+                            }
                         },
-                        FrameBody::Data { data, .. } => {
-                            state
-                        }
+                        _ => state
                     }
-                }
-                _ => state,
+                },
+
+                ReqAssemblerState::ReadingBody => {
+                    match frame.payload {
+                        FrameBody::Data { data, .. } => {
+                            body.extend_from_slice(&data); 
+
+                            let frame_flags: DataFlags = DataFlags::from_bits_retain(frame.header.flags);
+
+                            if frame_flags.contains(DataFlags::END_STREAM) {
+                                ReqAssemblerState::Done
+                            } else {
+                                state
+                            }
+                        },
+                        FrameBody::Headers { hdr_block_frag, .. } => {
+                            trailer_block.extend_from_slice(&hdr_block_frag);
+                            
+                            let frame_flags: HeadersFlags = HeadersFlags::from_bits_retain(frame.header.flags); 
+
+                            if frame_flags.contains(HeadersFlags::END_STREAM) {
+                                ReqAssemblerState::Done
+                            } else {
+                                ReqAssemblerState::ReadingTrailer
+                            }
+                        },
+                        _ => state
+                    }
+                },
+
+                ReqAssemblerState::ReadingTrailer => {
+                    match frame.payload {
+                        FrameBody::Continuation { hdr_block_frag } => {
+                            trailer_block.extend_from_slice(&hdr_block_frag);
+
+                            let frame_flags: ContinuationFlags = ContinuationFlags::from_bits_retain(frame.header.flags);
+
+                            if frame_flags.contains(ContinuationFlags::END_HEADERS) {
+                                ReqAssemblerState::Done
+                            } else {
+                                state
+                            }
+                        },
+                        _ => state
+                    }
+                },
+
+                ReqAssemblerState::Done => break,
             }
         }
+        // Assemble a Request struct from bytes read
         match state {
             ReqAssemblerState::Done => {
                 let headers = decompress_header(hdr_block.into())?;
@@ -94,9 +144,9 @@ impl Stream {
                     0 => None, 
                     _ => Some(decompress_header(trailer_block.into())?)
                 };
-                let method = headers.get(":method").map_or(Err(()), |val| Ok(val))?.as_str();
+                let method = headers.get(":method").map_or(Err(()), |val| Ok(val))?.get(0).unwrap().as_str();
                 // Ignore scheme and authority for now
-                let path = headers.get(":path").map_or(Err(()), |val| Ok(val))?.as_str();
+                let path = headers.get(":path").map_or(Err(()), |val| Ok(val))?.get(0).unwrap().as_str();
                 Ok(HTTPRequest::new(method, path, "HTTP/2"))
             },
             _ => Err(())
@@ -105,6 +155,7 @@ impl Stream {
 
     fn recv(mut self, frame: Frame) {
         // TODO: Implement this
+        
     }
 
     fn send(self, frame: Frame) {

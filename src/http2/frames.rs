@@ -6,8 +6,6 @@ use ::bytes::{BufMut, Bytes, BytesMut, Buf};
 use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
 use super::connection::Settings;
-use crate::http::HeadersMap;
-
 
 bitflags! {
     pub struct DataFlags: u8 {
@@ -37,27 +35,6 @@ bitflags! {
 
     pub struct ContinuationFlags: u8 {
         const END_HEADERS = 0x4;
-    }
-}
-
-struct H2HeadersMap(HeadersMap);
-impl TryInto<Bytes> for H2HeadersMap {
-    type Error = ();
-    fn try_into(self) -> Result<Bytes, Self::Error> {
-        // TODO: Implement header block compression
-    }
-}
-impl TryFrom<Bytes> for H2HeadersMap {
-    type Error = ();
-    fn try_from(value: Bytes) -> Result<Self, Self::Error> {
-        // TODO: Implement header block decompression
-    }
-}
-impl H2HeadersMap {
-    fn merge(mut self, other: H2HeadersMap) {
-        for key in other.0.keys() {
-            self.0.insert(*key, *other.0.get(key).unwrap());
-        }
     }
 }
 
