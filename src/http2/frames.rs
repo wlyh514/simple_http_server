@@ -10,32 +10,32 @@ use crate::http::HeadersMap;
 
 
 bitflags! {
-    struct DataFlags: u8 {
+    pub struct DataFlags: u8 {
         const END_STREAM = 0x1;
         const PADDED = 0x8;
     }
 
-    struct HeadersFlags: u8 {
+    pub struct HeadersFlags: u8 {
         const END_STREAM = 0x1;
         const END_HEADERS = 0x4;
         const PADDED = 0x8;
         const PRIORITY = 0x20;
     }
 
-    struct SettingsFlags: u8 {
+    pub struct SettingsFlags: u8 {
         const ACK = 0x1;
     }
 
-    struct PushPromiseFlags: u8 {
+    pub struct PushPromiseFlags: u8 {
         const END_HEADERS = 0x4;
         const PADDED = 0x8;
     }
 
-    struct PingFlags: u8 {
+    pub struct PingFlags: u8 {
         const ACK = 0x1;
     }
 
-    struct ContinuationFlags: u8 {
+    pub struct ContinuationFlags: u8 {
         const END_HEADERS = 0x4;
     }
 }
@@ -66,7 +66,7 @@ const FRAME_HDR_SIZE: usize = 4 + 8 + 8 + 32;
 struct FrameHeader {
     length: usize,
     frame_type: u8,
-    flags: u8,
+    pub flags: u8,
     stream_id: u32,
 }
 impl FrameHeader {
@@ -100,7 +100,7 @@ impl TryFrom<Bytes> for FrameHeader {
 }
 
 /// See RFC7540 section 6
-enum FrameBody {
+pub enum FrameBody {
     Data {
         pad_length: usize,
         data: Bytes,
@@ -110,7 +110,7 @@ enum FrameBody {
         e: bool,
         stream_dep: u32,
         weight: u8,
-        hdr_block_frag: H2HeadersMap,
+        hdr_block_frag: Bytes,
     },
     Priority {
         e: bool,
@@ -127,7 +127,7 @@ enum FrameBody {
     PushPromise {
         pad_length: usize,
         promised_stream_id: u32,
-        hdr_block_frag: H2HeadersMap,
+        hdr_block_frag: Bytes,
     },
     Ping {
         data: Bytes,
@@ -141,7 +141,7 @@ enum FrameBody {
         window_size_increment: u32,
     },
     Continuation {
-        hdr_block_frag: H2HeadersMap,
+        hdr_block_frag: Bytes,
     },
 }
 impl FrameBody {
@@ -161,40 +161,37 @@ impl FrameBody {
     }
 
     /// Errors if hdr_block_frag failed to compress
-    fn try_size(self) -> Result<usize, &'static str> {
+    fn size(self) -> usize {
         match self {
             Self::Data { pad_length, data } => {
-                Ok(8 + data.len() + pad_length)
+                8 + data.len() + pad_length
             },
             Self::Headers { pad_length, hdr_block_frag, ..} => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
-                Ok(8 + 32 + 8 + hdr_block_frag_bytes.len() + pad_length)
+                8 + 32 + 8 + hdr_block_frag.len() + pad_length
             },
             Self::Priority { .. } => {
-                Ok(32 + 8)
+                32 + 8
             },
             Self::RstStream { .. } => {
-                Ok(32)
+                32
             },
             Self::Settings { .. } => {
-                Ok(16 + 32)
+                16 + 32
             },
             Self::PushPromise { pad_length, hdr_block_frag, .. } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
-                Ok(8 + 32 + hdr_block_frag_bytes.len() + pad_length)
+                8 + 32 + hdr_block_frag.len() + pad_length
             },
             Self::Ping { .. } => {
-                Ok(64)
+                64
             },
             Self::GoAway { additional_debug_data, .. } => {
-                Ok(32 + 32 + additional_debug_data.len())
+                32 + 32 + additional_debug_data.len()
             },
             Self::WindowUpdate { .. } => {
-                Ok(32)
+                32
             },
             Self::Continuation { hdr_block_frag } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
-                Ok(hdr_block_frag_bytes.len())
+                hdr_block_frag.len()
             }
         }
     }
@@ -308,8 +305,7 @@ impl FrameBody {
                 let weight = buf.get_u8();
 
                 let hdr_block_frag_len = hdr.length - 8 - 32 - 8 - pad_length;
-                let hdr_block_frag_bytes = buf.slice(..hdr_block_frag_len);
-                let hdr_block_frag = H2HeadersMap::try_from(hdr_block_frag_bytes).map_err(|_| "Error decompressing header")?;
+                let hdr_block_frag = buf.slice(..hdr_block_frag_len);
                 Ok(Self::Headers { pad_length, e, stream_dep, weight, hdr_block_frag })
             }, 
             0x2 => {
@@ -334,8 +330,7 @@ impl FrameBody {
             0x5 => {
                 let pad_length: usize = buf.get_u8().into(); 
                 let promised_stream_id = buf.get_u32() & 0x7fff_ffff;
-                let hdr_block_frag_bytes = buf.slice(..(hdr.length - 8 - 32 - pad_length));
-                let hdr_block_frag = H2HeadersMap::try_from(hdr_block_frag_bytes).map_err(|_| "Error decompressing header")?;
+                let hdr_block_frag = buf.slice(..(hdr.length - 8 - 32 - pad_length));
                 Ok(Self::PushPromise { pad_length, promised_stream_id, hdr_block_frag})
             },
             0x6 => {
@@ -353,7 +348,7 @@ impl FrameBody {
                 Ok(Self::WindowUpdate { window_size_increment })
             },
             0x9 => {
-                let hdr_block_frag: H2HeadersMap = buf.slice(..hdr.length).try_into().map_err(|_| "Error decompressing header")?;
+                let hdr_block_frag = buf.slice(..hdr.length);
                 Ok(Self::Continuation { hdr_block_frag })
             },
             _ => Err("Unknown frame type")
@@ -362,12 +357,12 @@ impl FrameBody {
 }
 
 pub struct Frame {
-    header: FrameHeader,
-    payload: FrameBody,
+    pub header: FrameHeader,
+    pub payload: FrameBody,
 }
 impl Frame {
     pub fn new(stream_id: u32, payload: FrameBody, flags: u8) -> Result<Self, &'static str> {
-        let body_size = payload.try_size()?;
+        let body_size = payload.size();
         Ok(Self {
             header: FrameHeader {
                 length: body_size,
@@ -381,7 +376,7 @@ impl Frame {
 
     /// A frame must be verified before serialized and sent. 
     pub fn validate(self) -> Result<(), &'static str> {
-        let payload_len = self.payload.try_size()?;
+        let payload_len = self.payload.size();
         if payload_len != self.header.length {
             return Err("Incorrect FrameHeader.length")
         }
