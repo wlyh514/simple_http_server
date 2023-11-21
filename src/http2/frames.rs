@@ -95,7 +95,7 @@ pub enum FrameBody {
         weight: u8,
     },
     RstStream {
-        error_code: ErrorCodes,
+        error_code: ErrorCode,
     },
     Settings {
         identifier: Settings,
@@ -111,7 +111,7 @@ pub enum FrameBody {
     },
     GoAway {
         last_stream_id: u32,
-        error_code: ErrorCodes,
+        error_code: ErrorCode,
         additional_debug_data: Bytes,
     },
     WindowUpdate {
@@ -295,7 +295,7 @@ impl FrameBody {
             },
             0x3 => {
                 let error_code = buf.get_u32(); 
-                let error_code: ErrorCodes = error_code.try_into().map_err(|_| "Unknown error code")?;
+                let error_code: ErrorCode = error_code.try_into().map_err(|_| "Unknown error code")?;
                 Ok(Self::RstStream { error_code })
             },
             0x4 => {
@@ -316,7 +316,7 @@ impl FrameBody {
             },
             0x7 => {
                 let last_stream_id = buf.get_u32() & 0x7fff_ffff;
-                let error_code: ErrorCodes = buf.get_u32().try_into().map_err(|_| "Unknown error code")?;
+                let error_code: ErrorCode = buf.get_u32().try_into().map_err(|_| "Unknown error code")?;
                 let additional_debug_data = buf.slice(..(hdr.length - 32 - 32));
                 Ok(Self::GoAway { last_stream_id, error_code, additional_debug_data })
             },
@@ -394,7 +394,7 @@ impl TryInto<Bytes> for Frame {
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
 #[repr(u32)]
-enum ErrorCodes {
+pub enum ErrorCode {
     NoError = 0x0,
     ProtocolError = 0x1,
     InternalError = 0x2,

@@ -4,7 +4,7 @@ use bytes::{BytesMut, Bytes};
 
 use crate::http::{HTTPRequest, HeadersMap};
 
-use super::frames::{Frame, FrameBody, HeadersFlags, ContinuationFlags, DataFlags};
+use super::frames::{Frame, FrameBody, HeadersFlags, ContinuationFlags, DataFlags, ErrorCode};
 
 pub struct Stream {
     id: i32,
@@ -40,7 +40,7 @@ impl Stream {
         }
     }
 
-    fn assemble_request(self) -> Result<HTTPRequest, ()> {
+    fn assemble_request(self) -> Result<HTTPRequest, ErrorCode> {
         let mut hdr_block = BytesMut::new();
         let mut body = BytesMut::new();
         let mut trailer_block = BytesMut::new();
@@ -135,21 +135,28 @@ impl Stream {
         // Assemble a Request struct from bytes read
         match state {
             ReqAssemblerState::Done => {
-                let headers = decompress_header(hdr_block.into())?;
+                let headers = decompress_header(hdr_block.into()).map_err(|_| ErrorCode::CompressionError)?;
                 let body: Option<Bytes> = match body.len() {
                     0 => None, 
                     _ => Some(body.into()),
                 };
                 let trailer: Option<HeadersMap> = match trailer_block.len() {
                     0 => None, 
-                    _ => Some(decompress_header(trailer_block.into())?)
+                    _ => Some(decompress_header(trailer_block.into()).map_err(|_| ErrorCode::CompressionError)?),
                 };
-                let method = headers.get(":method").map_or(Err(()), |val| Ok(val))?.get(0).unwrap().as_str();
-                // Ignore scheme and authority for now
-                let path = headers.get(":path").map_or(Err(()), |val| Ok(val))?.get(0).unwrap().as_str();
+
+                // Validate request, see RFC7540 section 8.1.2.6
+                let method = hdr_field_try_get_single_val(headers, ":method")?;
+                let _scheme = hdr_field_try_get_single_val(headers, ":scheme")?;
+                let path = hdr_field_try_get_single_val(headers, ":path")?;
+
+                if body.is_some() && !body.unwrap().is_empty() {
+                    
+                }
+
                 Ok(HTTPRequest::new(method, path, "HTTP/2"))
             },
-            _ => Err(())
+            _ => Err(ErrorCode::ProtocolError)
         }
     }
 
@@ -164,6 +171,20 @@ impl Stream {
 }
 
 
+/// Checks if field_name of hdr_map contains exactly one value. If true, return Some(value)
+fn hdr_field_try_get_single_val(hdr_map: HeadersMap, field_name: &str) -> Result<&str, ErrorCode> {
+    let vals = hdr_map.get(field_name);
+    match vals {
+        Some(vals) => {
+            match vals.len() {
+                1 => Ok(vals.get(0).unwrap()), 
+                _ => Err(ErrorCode::ProtocolError),
+            }
+        }, 
+        None => Err(ErrorCode::ProtocolError),
+    }
+}
+
 fn compress_header(hdrs: HeadersMap) -> Result<Bytes, ()> {
     // TODO: Implement this
     Err(())
@@ -173,3 +194,5 @@ fn decompress_header(bytes: Bytes) -> Result<HeadersMap, ()> {
     // TODO: Implement this
     Err(())
 }
+
+// https://prod.liveshare.vsengsaas.visualstudio.com/join?E3D9760360C65129C29CB3071F23E6C3534B

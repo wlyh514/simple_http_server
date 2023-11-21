@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
+// TODO: Wrap this in a struct
 pub type HeadersMap = HashMap<String, Vec<String>>;
 
 pub struct HTTPRequest {
