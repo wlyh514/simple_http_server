@@ -3,7 +3,15 @@ use std::collections::HashMap;
 use bytes::Bytes;
 
 pub type HeadersMap = HashMap<String, Vec<String>>;
+
+/// Calculate the length of an uncompressed header, see RFC 7540 section 6.5.2: SETTINGS_MAX_FRAME_SIZE
+pub fn hdr_map_size(hdr_map: HeadersMap) -> usize {
+    // TODO
+    0
+}
+
 pub trait ReqHandlerFn: Fn(HTTPRequest) -> HTTPResponse {}
+impl<F: Fn(HTTPRequest) -> HTTPResponse> ReqHandlerFn for F {}
 
 pub struct HTTPRequest {
     pub method: String,
@@ -27,17 +35,25 @@ impl HTTPRequest {
     }
 }
 
+#[derive(Debug)]
 pub struct HTTPResponse {
-    status: ResponseStatus,
-    protocol: String,
+    pub status: ResponseStatus,
+    pub protocol: String,
 
-    headers: HeadersMap,
-    body: Option<Bytes>,
-    trailers: Option<HeadersMap>,
+    pub headers: HeadersMap,
+    pub body: Option<Bytes>,
+    pub trailers: Option<HeadersMap>,
+}
+impl HTTPResponse {
+    pub fn default() -> Self {
+        // Testing purposes only
+        Self { status: ResponseStatus::Ok, protocol: String::from(""), headers: HeadersMap::new(), body: None, trailers: None }
+    }
 }
 
+#[derive(Debug)]
 #[repr(u32)]
-enum ResponseStatus {
+pub enum ResponseStatus {
     // Informational
     Continue = 100, 
     SwitchingProtocols = 101,
@@ -91,6 +107,4 @@ enum ResponseStatus {
     ServiceUnavaliable = 503, 
     GatewayTimeout = 504, 
     HTTPVersionNotSupported = 505, 
-
-    Custom(u32),
 }

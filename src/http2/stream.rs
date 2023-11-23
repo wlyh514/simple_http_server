@@ -5,7 +5,7 @@ use crate::http::{HTTPRequest, HeadersMap};
 use super::frames::{Frame, FrameBody, HeadersFlags, ContinuationFlags, DataFlags, ErrorCode};
 
 pub struct Stream {
-    id: i32,
+    pub id: u32,
     state: StreamState,
     received_frames: Vec<Frame>,
 }
@@ -28,7 +28,7 @@ enum ReqAssemblerState {
 }
 
 impl Stream {
-    pub fn new(id: i32) -> Stream {
+    pub fn new(id: u32) -> Stream {
         Stream {
             id,
             state: StreamState::Idle,
@@ -233,7 +233,7 @@ impl Stream {
         Ok(None)
     }
 
-    fn send(self, frame: Frame) {
+    pub fn send(self, frame: Frame) {
         // TODO: Implement this
     }
 
@@ -254,12 +254,12 @@ fn hdr_field_try_get_single_val(hdr_map: HeadersMap, field_name: &str) -> Result
     }
 }
 
-fn compress_header(hdrs: HeadersMap) -> Result<Bytes, ()> {
+pub fn compress_header(hdrs: HeadersMap) -> Result<Bytes, ()> {
     // TODO: Implement this
     Err(())
 }
 
-fn decompress_header(bytes: Bytes) -> Result<HeadersMap, ()> {
+pub fn decompress_header(bytes: Bytes) -> Result<HeadersMap, ()> {
     // TODO: Implement this
     Err(())
 }

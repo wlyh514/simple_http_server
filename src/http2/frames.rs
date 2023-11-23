@@ -78,9 +78,9 @@ impl TryFrom<Bytes> for FrameHeader {
     }
 }
 
-struct SettingParam {
-    identifier: SettingsIdentifier, 
-    value: u32
+pub struct SettingParam {
+    pub identifier: SettingsIdentifier, 
+    pub value: u32
 }
 
 /// See RFC7540 section 6
@@ -351,9 +351,9 @@ pub struct Frame {
     pub payload: FrameBody,
 }
 impl Frame {
-    pub fn new(stream_id: u32, payload: FrameBody, flags: u8) -> Result<Self, &'static str> {
+    pub fn new(stream_id: u32, flags: u8, payload: FrameBody) -> Self{
         let body_size = payload.size();
-        Ok(Self {
+        Self {
             header: FrameHeader {
                 length: body_size,
                 frame_type: payload.to_id(),
@@ -361,7 +361,7 @@ impl Frame {
                 stream_id,
             },
             payload,
-        })
+        }
     }
 
     /// A frame must be verified before serialized and sent. 
@@ -405,7 +405,7 @@ impl TryInto<Bytes> for Frame {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive)]
+#[derive(Debug, Eq, PartialEq, TryFromPrimitive, IntoPrimitive, Clone)]
 #[repr(u32)]
 pub enum ErrorCode {
     NoError = 0x0,

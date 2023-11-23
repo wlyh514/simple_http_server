@@ -30,7 +30,11 @@ fn handle_h2_connection(mut stream: TcpStream) {
         if preface_starter == "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
             let reader = BufReader::new(stream);
             if let Ok(preface_frame) = http2::frames::Frame::try_read_from_buf(reader) {
-                if let FrameBody::Settings(settings) = preface_frame.payload {
+                if let FrameBody::Settings(settings_params) = preface_frame.payload {
+                    let mut settings = SettingsMap::new();
+                    for param in settings_params {
+                        settings.set(param.identifier, param.value);
+                    }
                     Some(settings)
                 } else {
                     None
