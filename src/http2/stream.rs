@@ -1,5 +1,3 @@
-use ::std::net::TcpStream;
-
 use bytes::{BytesMut, Bytes};
 
 use crate::http::{HTTPRequest, HeadersMap};
@@ -9,7 +7,6 @@ use super::frames::{Frame, FrameBody, HeadersFlags, ContinuationFlags, DataFlags
 pub struct Stream {
     id: i32,
     state: StreamState,
-    tcp_stream: TcpStream,
     received_frames: Vec<Frame>,
 }
 enum StreamState {
@@ -31,11 +28,10 @@ enum ReqAssemblerState {
 }
 
 impl Stream {
-    fn new(id: i32, tcp_stream: TcpStream) -> Stream {
+    pub fn new(id: i32) -> Stream {
         Stream {
             id,
             state: StreamState::Idle,
-            tcp_stream,
             received_frames: vec![]
         }
     }
@@ -160,14 +156,87 @@ impl Stream {
         }
     }
 
-    fn recv(mut self, frame: Frame) {
-        // TODO: Implement this
-        
+    pub fn recv(mut self, frame: Frame) -> Result<Option<HTTPRequest>, ErrorCode> {
+        let end_of_stream: bool = match frame.payload {
+            FrameBody::Headers { .. } => {
+                let hdr_flags: HeadersFlags = HeadersFlags::from_bits_retain(frame.header.flags);
+                hdr_flags.contains(HeadersFlags::END_STREAM)
+            },
+            FrameBody::Data { .. } => {
+                let hdr_flags: DataFlags = DataFlags::from_bits_retain(frame.header.flags);
+                hdr_flags.contains(DataFlags::END_STREAM)
+            },
+            _ => false
+        };
+
+        // The state machine defined in section 5.1
+        let next_state: StreamState = match self.state {
+            StreamState::Idle => {
+                match frame.payload {
+                    FrameBody::PushPromise { .. } => StreamState::ReservedRemote,
+                    FrameBody::Headers { .. } => StreamState::Open,
+                    _ => self.state
+                }
+            },
+
+            StreamState::Open => {
+                if end_of_stream {
+                    StreamState::HalfClosedRemote
+                } else {
+                    match frame.payload {
+                        FrameBody::RstStream { .. } => StreamState::Closed,
+                        _ => self.state
+                    }
+                }
+            },
+
+            StreamState::ReservedRemote => {
+                match frame.payload {
+                    FrameBody::RstStream { .. } => StreamState::Closed,
+                    _ => self.state,
+                }
+            },
+
+            StreamState::ReservedLocal => {
+                match frame.payload {
+                    FrameBody::RstStream { .. } => StreamState::Closed,
+                    _ => self.state,
+                }
+            },
+
+            StreamState::HalfClosedRemote => {
+                match frame.payload {
+                    FrameBody::RstStream { .. } => StreamState::Closed,
+                    _ => self.state,
+                }
+            },
+
+            StreamState::HalfClosedLocal => {
+                if end_of_stream {
+                    StreamState::Closed
+                } else {
+                    match frame.payload {
+                        FrameBody::RstStream { .. } => StreamState::Closed,
+                        _ => self.state
+                    }
+                }
+            },
+
+            StreamState::Closed => self.state
+        };
+
+        // TODO: Handle frames with an impact on the stream
+
+        self.received_frames.push(frame);
+        self.state = next_state;
+
+        Ok(None)
     }
 
     fn send(self, frame: Frame) {
         // TODO: Implement this
     }
+
 }
 
 
@@ -194,5 +263,3 @@ fn decompress_header(bytes: Bytes) -> Result<HeadersMap, ()> {
     // TODO: Implement this
     Err(())
 }
-
-// https://prod.liveshare.vsengsaas.visualstudio.com/join?E3D9760360C65129C29CB3071F23E6C3534B

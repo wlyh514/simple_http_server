@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
-// TODO: Wrap this in a struct
 pub type HeadersMap = HashMap<String, Vec<String>>;
+pub trait ReqHandlerFn: Fn(HTTPRequest) -> HTTPResponse {}
 
 pub struct HTTPRequest {
     pub method: String,

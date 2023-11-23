@@ -5,7 +5,7 @@ use ::bitflags::bitflags;
 use ::bytes::{BufMut, Bytes, BytesMut, Buf};
 use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
-use super::connection::Settings;
+use super::connection::SettingsIdentifier;
 
 bitflags! {
     pub struct DataFlags: u8 {
@@ -38,7 +38,7 @@ bitflags! {
     }
 }
 
-const FRAME_HDR_SIZE: usize = 4 + 8 + 8 + 32;
+const FRAME_HDR_SIZE: usize = 24 + 8 + 8 + 32;
 /// See RFC7540 section 4
 struct FrameHeader {
     length: usize,
@@ -62,8 +62,10 @@ impl TryFrom<Bytes> for FrameHeader {
     type Error = &'static str;
 
     fn try_from(mut buf: Bytes) -> Result<Self, Self::Error> {
-        assert!(buf.len() >= 9);
-        let length: usize = ((buf.get_u8() << 16) | (buf.get_u8() << 8) | buf.get_u8()).into();
+        if buf.len() > 9 {
+            return Err("Buffer is too short");
+        }
+        let length: usize = ((buf.get_u8() as usize) << 16) | ((buf.get_u8() as usize) << 8) | (buf.get_u8() as usize);
         let frame_type = buf.get_u8(); 
         let flags = buf.get_u8();
         let stream_id = buf.get_u32() & 0x7fff_ffff;
@@ -74,6 +76,11 @@ impl TryFrom<Bytes> for FrameHeader {
 
         Ok(Self {length, frame_type, flags, stream_id})
     }
+}
+
+struct SettingParam {
+    identifier: SettingsIdentifier, 
+    value: u32
 }
 
 /// See RFC7540 section 6
@@ -97,10 +104,7 @@ pub enum FrameBody {
     RstStream {
         error_code: ErrorCode,
     },
-    Settings {
-        identifier: Settings,
-        value: u32,
-    },
+    Settings (Vec<SettingParam>),
     PushPromise {
         pad_length: usize,
         promised_stream_id: u32,
@@ -218,9 +222,11 @@ impl FrameBody {
                 buf.put_u32(error_code as u32);
                 Ok(())
             }
-            Self::Settings { identifier, value } => {
-                buf.put_u16(identifier as u16);
-                buf.put_u32(value);
+            Self::Settings (params) => {
+                for param in params {
+                    buf.put_u16(param.identifier as u16);
+                    buf.put_u32(param.value);
+                }
                 Ok(())
             }
             Self::PushPromise {
@@ -299,10 +305,17 @@ impl FrameBody {
                 Ok(Self::RstStream { error_code })
             },
             0x4 => {
-                let identifier: Settings = buf.get_u16().try_into().map_err(|_| "Unknown settings identifier")?;
+                let mut remaining_size: usize = hdr.length;
+                let mut setting_params: Vec<SettingParam> = vec![];
+                while remaining_size >= 48 {
+                    let identifier: SettingsIdentifier = buf.get_u16().try_into().map_err(|_| "Unknown settings identifier")?;
+                    let value = buf.get_u32();
 
-                let value = buf.get_u32(); 
-                Ok(Self::Settings { identifier, value })
+                    setting_params.push(SettingParam { identifier, value });
+                    remaining_size -= 48;
+                }
+
+                Ok(Self::Settings (setting_params))
             },
             0x5 => {
                 let pad_length: usize = buf.get_u8().into(); 

@@ -7,6 +7,9 @@ use std::{
     time::Duration,
     vec, collections::VecDeque,
 };
+
+use bytes::BytesMut;
+use http2::{connection::SettingsMap, frames::FrameBody};
 pub mod http;
 pub mod http2;
 
@@ -15,6 +18,36 @@ type ResponseQueue = VecDeque<JoinHandle<String>>;
 enum RespHandlerSignal {
     NewResp, 
     Finished,
+}
+
+/// Section 3.5
+fn handle_h2_connection(mut stream: TcpStream) {
+    // recv preface
+    let mut preface_starter = BytesMut::with_capacity(24);
+    stream.read_exact(&mut preface_starter);
+
+    let client_settings: Option<SettingsMap> = if let Ok(preface_starter) = String::from_utf8(preface_starter.to_vec()) {
+        if preface_starter == "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
+            let reader = BufReader::new(stream);
+            if let Ok(preface_frame) = http2::frames::Frame::try_read_from_buf(reader) {
+                if let FrameBody::Settings(settings) = preface_frame.payload {
+                    Some(settings)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // send preface
+
+
 }
 
 fn handle_connection(stream: TcpStream) {

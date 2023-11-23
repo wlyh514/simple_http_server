@@ -1,3 +1,4 @@
 pub mod connection;
-mod frames;
+pub mod frames;
+pub mod server;
 mod stream;
