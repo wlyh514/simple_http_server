@@ -185,6 +185,8 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
             };
             let result = stream.recv(frame);
 
+            // TODO: Upon settings frame, update settings and send settings frame with ACK. 
+
             match result {
                 Ok(Some(req)) => {
                     let tx = queue_tx.clone();

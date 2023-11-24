@@ -4,6 +4,7 @@ use crate::http::{HTTPRequest, HeadersMap};
 
 use super::frames::{Frame, FrameBody, HeadersFlags, ContinuationFlags, DataFlags, ErrorCode};
 
+/// Maintains a state machine and a vector of received frames
 pub struct Stream {
     pub id: u32,
     state: StreamState,

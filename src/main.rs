@@ -7,11 +7,13 @@ use std::{
     time::Duration,
     vec, collections::VecDeque,
 };
-
-use bytes::BytesMut;
-use http2::{connection::SettingsMap, frames::FrameBody};
 pub mod http;
 pub mod http2;
+
+use bytes::BytesMut;
+use http::ResponseStatus;
+use http2::{connection::SettingsMap, frames::FrameBody};
+
 
 type ResponseQueue = VecDeque<JoinHandle<String>>;
 
@@ -49,7 +51,7 @@ fn handle_h2_connection(mut stream: TcpStream) {
         None
     };
 
-    // send preface
+    let frame = http2::frames::Frame::new()
 
 
 }
@@ -113,6 +115,7 @@ fn handle_response(response_queue: Arc<Mutex<ResponseQueue>>, mut stream: TcpStr
     }
 }
 
+/// For old HTTP/1.1 code
 fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerSignal>) -> String {
     println!("Request: {:#?}", &http_request);
     let request_line = http_request[0].clone();
@@ -140,14 +143,37 @@ fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerS
     return response;
 }
 
+fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
+    let (status, file_name) = match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/") => (ResponseStatus::Ok, "index.html"),
+        (_, "/slow") => {
+            // Simulate long processing time
+            thread::sleep(Duration::from_secs(10));
+            (ResponseStatus::Ok, "index.html")
+        }
+        _ => (ResponseStatus::NotFound, "404.html"),
+    };
+
+    let contents = fs::read(format!("static/{file_name}")).unwrap();
+    let content_length = contents.len();
+    let mut response = http::HTTPResponse::default();
+
+    response.headers.insert("content-length".into(), vec![format!("{content_length}")]);
+    response.body = Some(contents.into());
+
+    response
+}
+
 fn main() {
     let listener = TcpListener::bind("localhost:7878").unwrap();
+
+    let h2_server = http2::server::Server::new(request_handler);
 
     println!("Server started");
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
 
-        handle_connection(stream);
+        h2_server.handle_connection(stream);
     }
 }

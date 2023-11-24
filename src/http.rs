@@ -38,7 +38,6 @@ impl HTTPRequest {
 #[derive(Debug)]
 pub struct HTTPResponse {
     pub status: ResponseStatus,
-    pub protocol: String,
 
     pub headers: HeadersMap,
     pub body: Option<Bytes>,
@@ -47,7 +46,7 @@ pub struct HTTPResponse {
 impl HTTPResponse {
     pub fn default() -> Self {
         // Testing purposes only
-        Self { status: ResponseStatus::Ok, protocol: String::from(""), headers: HeadersMap::new(), body: None, trailers: None }
+        Self { status: ResponseStatus::Ok, headers: HeadersMap::new(), body: None, trailers: None }
     }
 }
 
