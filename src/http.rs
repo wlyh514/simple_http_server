@@ -138,3 +138,67 @@ pub enum ResponseStatus {
     GatewayTimeout = 504,
     HTTPVersionNotSupported = 505,
 }
+
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_uncompressed_header_list_size_correctly() {
+        let mut hdr_map: HashMap<String, HeaderVal> = HeadersMap::new();
+
+        let header_name_1 = String::from("Accept");
+        let header_value_1 = HeaderVal::Single(String::from("text/html"));
+        let header_name_2 = String::from("Accept-Encoding");
+        let header_value_2 = HeaderVal::Multiple(vec![
+            String::from("gzip"),
+            String::from("deflate"),
+            String::from("br"),
+        ]);
+        let header_name_3 = String::from("Accept-Language");
+        let header_value_3 = HeaderVal::Single(String::from("en-US"));
+        let header_name_4 = String::from("Cache-Control");
+        let header_value_4 = HeaderVal::Single(String::from("max-age=0"));
+        let header_name_5 = String::from("Connection");
+        let header_value_5 = HeaderVal::Single(String::from("keep-alive"));
+        let header_name_6 = String::from("Cookie");
+        let haader_value_6 = HeaderVal::Single(String::from("cookie1=foo; cookie2=bar"));
+        let header_name_7 = String::from("Host");
+        let header_value_7 = HeaderVal::Single(String::from("localhost:8080"));
+        let header_name_8 = String::from("Upgrade-Insecure-Requests");
+        let header_value_8 = HeaderVal::Single(String::from("1"));
+        let header_name_9 = String::from("User-Agent");
+        let header_value_9 = HeaderVal::Single(String::from("Chrome/51.0.2704.103"));
+
+        hdr_map.insert(header_name_1, header_value_1);
+        hdr_map.insert(header_name_2, header_value_2);
+        hdr_map.insert(header_name_3, header_value_3);
+        hdr_map.insert(header_name_4, header_value_4);
+        hdr_map.insert(header_name_5, header_value_5);
+        hdr_map.insert(header_name_6, haader_value_6);
+        hdr_map.insert(header_name_7, header_value_7);
+        hdr_map.insert(header_name_8, header_value_8);
+        hdr_map.insert(header_name_9, header_value_9);
+
+        let actual_size = mem::size_of_val(&header_name_1)
+            + mem::size_of_val(&header_value_1)
+            + mem::size_of_val(&header_name_2)
+            + mem::size_of_val(&header_value_2)
+            + mem::size_of_val(&header_name_3)
+            + mem::size_of_val(&header_value_3)
+            + mem::size_of_val(&header_name_4)
+            + mem::size_of_val(&header_value_4)
+            + mem::size_of_val(&header_name_5)
+            + mem::size_of_val(&header_value_5)
+            + mem::size_of_val(&header_name_6)
+            + mem::size_of_val(&haader_value_6)
+            + mem::size_of_val(&header_name_7)
+            + mem::size_of_val(&header_value_7)
+            + mem::size_of_val(&header_name_8)
+            + mem::size_of_val(&header_value_8)
+            + mem::size_of_val(&header_name_9)
+            + mem::size_of_val(&header_value_9)
+            + 32 * 9;
+
+        assert_eq!(hdr_map_size(hdr_map), actual_size);
+    }
+}
