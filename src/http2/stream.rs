@@ -1,6 +1,6 @@
 use bytes::{BytesMut, Bytes};
 
-use crate::http::{HTTPRequest, HeadersMap};
+use crate::http::{HTTPRequest, HeadersMap, HeaderVal};
 
 use super::frames::{Frame, FrameBody, HeadersFlags, ContinuationFlags, DataFlags, ErrorCode};
 
@@ -246,8 +246,8 @@ fn hdr_field_try_get_single_val(hdr_map: HeadersMap, field_name: &str) -> Result
     let vals = hdr_map.get(field_name);
     match vals {
         Some(vals) => {
-            match vals.len() {
-                1 => Ok(vals.get(0).unwrap()), 
+            match vals {
+                HeaderVal::Single(val) => Ok(val), 
                 _ => Err(ErrorCode::ProtocolError),
             }
         }, 

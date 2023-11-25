@@ -2,13 +2,21 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 
-pub type HeadersMap = HashMap<String, Vec<String>>;
+
 
 /// Calculate the length of an uncompressed header, see RFC 7540 section 6.5.2: SETTINGS_MAX_FRAME_SIZE
 pub fn hdr_map_size(hdr_map: HeadersMap) -> usize {
     // TODO
     0
 }
+
+#[derive(Debug)]
+pub enum HeaderVal {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+pub type HeadersMap = HashMap<String, HeaderVal>;
 
 pub trait ReqHandlerFn: Fn(HTTPRequest) -> HTTPResponse {}
 impl<F: Fn(HTTPRequest) -> HTTPResponse> ReqHandlerFn for F {}

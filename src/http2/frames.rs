@@ -41,10 +41,10 @@ bitflags! {
 const FRAME_HDR_SIZE: usize = 24 + 8 + 8 + 32;
 /// See RFC7540 section 4
 struct FrameHeader {
-    length: usize,
+    pub length: usize,
     frame_type: u8,
     pub flags: u8,
-    stream_id: u32,
+    pub stream_id: u32,
 }
 impl FrameHeader {
     fn put_buf(self, mut buf: BytesMut) {

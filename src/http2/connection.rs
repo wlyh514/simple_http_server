@@ -3,35 +3,33 @@ use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
 use crate::http::{ReqHandlerFn, HTTPRequest, HTTPResponse, hdr_map_size};
 
-use super::{frames::{Frame, SettingParam, FrameBody, HeadersFlags, ContinuationFlags, DataFlags, ErrorCode}, stream::{Stream, compress_header}};
+use super::{frames::{Frame, SettingParam, FrameBody, HeadersFlags, ContinuationFlags, DataFlags, ErrorCode, SettingsFlags}, stream::{Stream, compress_header}};
 use std::io::Write;
 use ::std::{collections::HashMap, net::TcpStream, thread, sync::{Arc, Mutex, mpsc}};
-
-pub type TaggedFrame = (u32, Frame);
 
 enum ResponseQueueError {
     Terminated
 }
-struct ResponseQueueRx(mpsc::Receiver<TaggedFrame>);
+struct ResponseQueueRx(mpsc::Receiver<Frame>);
 #[derive(Clone)]
-struct ResponseQueueTx(mpsc::Sender<TaggedFrame>);
+struct ResponseQueueTx(mpsc::Sender<Frame>);
 
 impl ResponseQueueRx {
-    pub fn new(rx: mpsc::Receiver<TaggedFrame>) -> Self {
+    pub fn new(rx: mpsc::Receiver<Frame>) -> Self {
         Self(rx)
     }
 
-    pub fn pop(&self) -> Result<TaggedFrame, ResponseQueueError> {
+    pub fn pop(&self) -> Result<Frame, ResponseQueueError> {
         self.0.recv().map_err(|_| ResponseQueueError::Terminated)
     }
 }
 
 impl ResponseQueueTx {
-    pub fn new(tx: mpsc::Sender<TaggedFrame>) -> Self {
+    pub fn new(tx: mpsc::Sender<Frame>) -> Self {
         Self(tx)
     }
 
-    pub fn push(&self, frame: TaggedFrame) {
+    pub fn push(&self, frame: Frame) {
         match self.0.send(frame) { _ => () }
     }
 }
@@ -56,10 +54,6 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
     }
 
     fn new_stream(&mut self) -> Stream {
-        // TODO: Implement this
-    }
-
-    fn read_frame(&self) -> Frame {
         // TODO: Implement this
     }
 
@@ -162,7 +156,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
         match self.make_frames(stream_id, resp) {
             Ok(frames) => {
                 for frame in frames {
-                    queue_tx.push((stream_id, frame))
+                    queue_tx.push(frame)
                 }
             },
             Err(_) => ()
@@ -183,11 +177,31 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                     *self.active_streams.lock().unwrap().get(&114514).unwrap()
                 },
             };
-            let result = stream.recv(frame);
 
             // TODO: Upon settings frame, update settings and send settings frame with ACK. 
+            match frame.payload {
+                // See section 6.5
+                FrameBody::Settings(settings) => {
+                    let flags = SettingsFlags::from_bits_retain(frame.header.flags);
+                    
+                    if flags.contains(SettingsFlags::ACK) {
+                        if frame.header.length != 0 {
+                            self.close_with_error(ErrorCode::FrameSizeError, frame.header.stream_id, queue_tx.clone());
+                            break;
+                        }
 
-            match result {
+                    } else {
+                        // Update self.settings
+                        // Send ACK
+                    }
+                },
+                FrameBody::GoAway { last_stream_id, error_code, additional_debug_data } => {
+                    // TODO
+                }
+                _ => {}, 
+            }
+
+            match stream.recv(frame) {
                 Ok(Some(req)) => {
                     let tx = queue_tx.clone();
                     thread::spawn(|| self.handle_request(req, 114514, tx));
@@ -203,14 +217,28 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
 
     fn run_tx(&self, queue_rx: ResponseQueueRx) {
         loop {
-            let (stream_id, frame) = match queue_rx.pop() {
+            let frame = match queue_rx.pop() {
                 Ok(tagged_resp) => { tagged_resp },
                 Err(_) => { break; }
             };
-            if let Some(stream) = self.active_streams.lock().unwrap().get(&stream_id) {
+            if let Some(stream) = self.active_streams.lock().unwrap().get(&frame.header.stream_id) {
                 self.send_frame(frame, *stream);
+                
+                if let FrameBody::GoAway{..} = frame.payload {
+                    self.close();
+                    break;
+                }
             }
         }
+    }
+
+    fn close_with_error(&mut self, error_code: ErrorCode, last_stream_id: u32, queue_tx: ResponseQueueTx) {
+        let frame: Frame = Frame::new(0, 0, FrameBody::GoAway { last_stream_id, error_code, additional_debug_data: Bytes::new() });
+        queue_tx.push(frame);
+    }
+
+    fn close(&mut self) {
+        // TODO
     }
 
     pub fn run(&self) {
@@ -279,6 +307,12 @@ impl SettingsMap {
 
     pub fn get(&self, identifier: SettingsIdentifier) -> Option<u32> {
         self.0.get(&(identifier as u16)).map(|val| *val)
+    }
+
+    pub fn update(&mut self, other: Self) {
+        for (key, val) in other.0 {
+            self.0.insert(key, val);
+        }
     }
 }
 impl From<Vec<SettingParam>> for SettingsMap {

@@ -11,7 +11,7 @@ pub mod http;
 pub mod http2;
 
 use bytes::BytesMut;
-use http::ResponseStatus;
+use http::{ResponseStatus, HeaderVal};
 use http2::{connection::SettingsMap, frames::FrameBody};
 
 
@@ -119,12 +119,6 @@ fn handle_response(response_queue: Arc<Mutex<ResponseQueue>>, mut stream: TcpStr
 fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerSignal>) -> String {
     println!("Request: {:#?}", &http_request);
     let request_line = http_request[0].clone();
-    let mut splited_request_line = request_line.split_whitespace();
-
-    let method = splited_request_line.next().unwrap();
-    let uri = splited_request_line.next().unwrap();
-    let _protocol = splited_request_line.next().unwrap();
-
     let (status_line, file_name) = match (method, uri) {
         ("GET", "/") => ("HTTP/1.1 200 OK", "index.html"),
         (_, "/slow") => {
@@ -158,7 +152,7 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
     let content_length = contents.len();
     let mut response = http::HTTPResponse::default();
 
-    response.headers.insert("content-length".into(), vec![format!("{content_length}")]);
+    response.headers.insert("content-length".into(), HeaderVal::Single("{content_length}".into()));
     response.body = Some(contents.into());
 
     response
