@@ -1,11 +1,31 @@
 use std::collections::HashMap;
+use std::mem;
 
 use bytes::Bytes;
 
-/// Calculate the length of an uncompressed header, see RFC 7540 section 6.5.2: SETTINGS_MAX_FRAME_SIZE
+/// Calculate the size of an uncompressed headers list in octets(bytes).
+/// See https://httpwg.org/specs/rfc7540.html#SETTINGS_MAX_HEADER_LIST_SIZE.
 pub fn hdr_map_size(hdr_map: HeadersMap) -> usize {
-    // TODO
-    0
+    let mut size: usize = 0;
+    for (key, value) in &hdr_map {
+        // 32 octet overhead for each entry.
+        size += 32;
+
+        // Add size of header name.
+        size += mem::size_of_val(key);
+
+        // Add size of header value(s).
+        match value {
+            HeaderVal::Single(val) => size += mem::size_of_val(val),
+            HeaderVal::Multiple(vals) => {
+                for val in vals {
+                    size += mem::size_of_val(val);
+                }
+            }
+        }
+    }
+
+    size
 }
 
 #[derive(Debug, PartialEq)]
