@@ -159,7 +159,7 @@ impl Stream {
         }
     }
 
-    pub fn recv(mut self, frame: Frame) -> Result<Option<HTTPRequest>, ErrorCode> {
+    pub fn recv(&mut self, frame: Frame) -> Result<Option<HTTPRequest>, ErrorCode> {
         let end_of_stream: bool = match frame.payload {
             FrameBody::Headers { .. } => {
                 let hdr_flags: HeadersFlags = HeadersFlags::from_bits_retain(frame.header.flags);
@@ -220,16 +220,89 @@ impl Stream {
             StreamState::Closed => self.state,
         };
 
-        // TODO: Handle frames with an impact on the stream
-
         self.received_frames.push(frame);
         self.state = next_state;
 
-        Ok(None)
+        // TRY TO DO: Support handling request before body is fully received
+
+        if end_of_stream {
+            self.assemble_request().map(|req| Some(req))
+        } else {
+            Ok(None)
+        }
     }
 
-    pub fn send(self, frame: Frame) {
-        // TODO: Implement this
+    pub fn send(&mut self, frame: Frame) {
+        let end_of_stream: bool = match frame.payload {
+            FrameBody::Headers { .. } => {
+                let hdr_flags: HeadersFlags = HeadersFlags::from_bits_retain(frame.header.flags);
+                hdr_flags.contains(HeadersFlags::END_STREAM)
+            }
+            FrameBody::Data { .. } => {
+                let hdr_flags: DataFlags = DataFlags::from_bits_retain(frame.header.flags);
+                hdr_flags.contains(DataFlags::END_STREAM)
+            }
+            _ => false,
+        };
+
+        // The state machine defined in section 5.1
+        let new_state: StreamState = match self.state {
+            StreamState::Idle => {
+                match frame.payload {
+                    FrameBody::PushPromise { .. } => StreamState::ReservedLocal, 
+                    FrameBody::Headers { .. } => StreamState::Open, 
+                    _ => self.state,
+                }
+            }, 
+
+            StreamState::Open => {
+                if end_of_stream {
+                    StreamState::HalfClosedLocal
+                } else {
+                    match frame.payload {
+                        FrameBody::RstStream { .. } => StreamState::Closed,
+                        _ => self.state, 
+                    }
+                }
+            },
+
+            StreamState::ReservedLocal => {
+                match frame.payload {
+                    FrameBody::Headers { .. } => StreamState::HalfClosedRemote,
+                    FrameBody::RstStream { .. } => StreamState::Closed,
+                    _ => self.state,
+                }
+            },
+
+            StreamState::HalfClosedRemote => {
+                if end_of_stream {
+                    StreamState::Closed
+                } else {
+                    match frame.payload {
+                        FrameBody::RstStream { .. } => StreamState::Closed,
+                        _ => self.state,
+                    }
+                }
+            },
+
+            StreamState::ReservedRemote => {
+                match frame.payload {
+                    FrameBody::RstStream { .. } => StreamState::Closed,
+                    _ => self.state,
+                }
+            },
+
+            StreamState::HalfClosedLocal => {
+                match frame.payload {
+                    FrameBody::RstStream { .. } => StreamState::Closed,
+                    _ => self.state, 
+                }
+            },
+
+            StreamState::Closed => self.state
+        };
+
+        self.state = new_state;
     }
 }
 
