@@ -43,10 +43,10 @@ pub struct Connection<T: ReqHandlerFn + Sync> {
 }
 
 impl<T: ReqHandlerFn + Sync> Connection<T> {
-    pub fn new(tcp_stream: TcpStream, handler: T) -> Connection<T> {
+    pub fn new(tcp_stream: TcpStream, handler: T, peer_settings_params: Vec<SettingParam>) -> Connection<T> {
         Connection {
             tcp_stream,
-            peer_settings: Arc::new(Mutex::new(SettingsMap::new())),
+            peer_settings: Arc::new(Mutex::new(SettingsMap::from(peer_settings_params))),
             stream_counter: 1,
             active_streams: Arc::new(Mutex::new(HashMap::new())),
             handler,
@@ -143,7 +143,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
     }
 
     /// Send a frame and update the frame's state machine accordingly. 
-    fn send_frame(&self, frame: Frame, stream: Stream) -> Result<(), ()> {
+    fn send_frame(&self, frame: Frame, mut stream: Stream) -> Result<(), ()> {
         stream.send(frame);
         let frame_bytes: Bytes = frame.try_into().map_err(|_| ())?;
         self.tcp_stream.write_all(&frame_bytes);
@@ -182,7 +182,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
             };
 
             let new_stream_required = false;        // TODO: Implement this
-            let stream: Stream = match new_stream_required {
+            let mut stream: Stream = match new_stream_required {
                 true => {
                     let new_stream = self.new_stream();
                     self.active_streams.lock().unwrap().insert(new_stream.id, new_stream);
@@ -311,7 +311,7 @@ impl SettingsIdentifier {
 pub struct SettingsMap (HashMap<u16, u32>);
 impl SettingsMap {
     /// Create a SettingsMap with default values
-    pub fn new() -> Self {
+    pub fn default() -> Self {
         let mut settings: HashMap<u16, u32> = HashMap::new();
         let mut settings_map = Self(settings);
         
@@ -354,5 +354,14 @@ impl From<Vec<SettingParam>> for SettingsMap {
             settings.insert(param.identifier as u16, param.value);
         }
         Self(settings)
+    }
+}
+impl Into<Vec<SettingParam>> for SettingsMap {
+    fn into(self) -> Vec<SettingParam> {
+        let mut params: Vec<SettingParam> = vec![];
+        for (key, value) in self.0 {
+            params.push(SettingParam { identifier: key.try_into().unwrap(), value });
+        }
+        params
     }
 }

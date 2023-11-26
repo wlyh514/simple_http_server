@@ -223,7 +223,7 @@ impl Stream {
         self.received_frames.push(frame);
         self.state = next_state;
 
-        // TRY TO DO: Support handling request before body is fully received
+        // TRY TODO: Support handling request before body is fully received
 
         if end_of_stream {
             self.assemble_request().map(|req| Some(req))

@@ -10,9 +10,7 @@ use std::{
 pub mod http;
 pub mod http2;
 
-use bytes::BytesMut;
 use http::{ResponseStatus, HeaderVal};
-use http2::{connection::SettingsMap, frames::FrameBody};
 
 
 type ResponseQueue = VecDeque<JoinHandle<String>>;
@@ -20,40 +18,6 @@ type ResponseQueue = VecDeque<JoinHandle<String>>;
 enum RespHandlerSignal {
     NewResp, 
     Finished,
-}
-
-/// Section 3.5
-fn handle_h2_connection(mut stream: TcpStream) {
-    // recv preface
-    let mut preface_starter = BytesMut::with_capacity(24);
-    stream.read_exact(&mut preface_starter);
-
-    let client_settings: Option<SettingsMap> = if let Ok(preface_starter) = String::from_utf8(preface_starter.to_vec()) {
-        if preface_starter == "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
-            let reader = BufReader::new(stream);
-            if let Ok(preface_frame) = http2::frames::Frame::try_read_from_buf(reader) {
-                if let FrameBody::Settings(settings_params) = preface_frame.payload {
-                    let mut settings = SettingsMap::new();
-                    for param in settings_params {
-                        settings.set(param.identifier, param.value);
-                    }
-                    Some(settings)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    let frame = http2::frames::Frame::new()
-
-
 }
 
 fn handle_connection(stream: TcpStream) {
@@ -119,6 +83,11 @@ fn handle_response(response_queue: Arc<Mutex<ResponseQueue>>, mut stream: TcpStr
 fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerSignal>) -> String {
     println!("Request: {:#?}", &http_request);
     let request_line = http_request[0].clone();
+    let mut splited_request_line = request_line.split_whitespace();
+    let method = splited_request_line.next().unwrap();
+    let uri = splited_request_line.next().unwrap();
+    let _protocol = splited_request_line.next().unwrap();
+
     let (status_line, file_name) = match (method, uri) {
         ("GET", "/") => ("HTTP/1.1 200 OK", "index.html"),
         (_, "/slow") => {
