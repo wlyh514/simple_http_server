@@ -13,7 +13,7 @@ pub struct Stream {
     pub state: StreamState,
     received_frames: Vec<Frame>,
 }
-#[derive(PartialEq)]
+#[derive(PartialEq, Clone, Copy)]
 pub enum StreamState {
     Idle,
     Open,
@@ -41,15 +41,15 @@ impl Stream {
         }
     }
 
-    fn assemble_request(self) -> Result<HTTPRequest, ErrorCode> {
+    fn assemble_request(&self) -> Result<HTTPRequest, ErrorCode> {
         let mut hdr_block = BytesMut::new();
         let mut body = BytesMut::new();
         let mut trailer_block = BytesMut::new();
 
         let mut state = ReqAssemblerState::Init;
-        for frame in self.received_frames {
+        for frame in &self.received_frames {
             state = match state {
-                ReqAssemblerState::Init => match frame.payload {
+                ReqAssemblerState::Init => match &frame.payload {
                     FrameBody::Headers { hdr_block_frag, .. } => {
                         hdr_block.extend_from_slice(&hdr_block_frag);
 
@@ -67,7 +67,7 @@ impl Stream {
                     _ => state,
                 },
 
-                ReqAssemblerState::ReadingHeader => match frame.payload {
+                ReqAssemblerState::ReadingHeader => match &frame.payload {
                     FrameBody::Continuation { hdr_block_frag } => {
                         hdr_block.extend_from_slice(&hdr_block_frag);
 
@@ -83,7 +83,7 @@ impl Stream {
                     _ => state,
                 },
 
-                ReqAssemblerState::ReadingBody => match frame.payload {
+                ReqAssemblerState::ReadingBody => match &frame.payload {
                     FrameBody::Data { data, .. } => {
                         body.extend_from_slice(&data);
 
@@ -111,7 +111,7 @@ impl Stream {
                     _ => state,
                 },
 
-                ReqAssemblerState::ReadingTrailer => match frame.payload {
+                ReqAssemblerState::ReadingTrailer => match &frame.payload {
                     FrameBody::Continuation { hdr_block_frag } => {
                         trailer_block.extend_from_slice(&hdr_block_frag);
 
@@ -139,7 +139,7 @@ impl Stream {
                     0 => None,
                     _ => Some(body.into()),
                 };
-                let trailer: Option<HeadersMap> = match trailer_block.len() {
+                let trailers: Option<HeadersMap> = match trailer_block.len() {
                     0 => None,
                     _ => Some(
                         decompress_header(trailer_block.into())
@@ -148,13 +148,17 @@ impl Stream {
                 };
 
                 // Validate request, see RFC7540 section 8.1.2.6
-                let method = hdr_field_try_get_single_val(headers, ":method")?;
-                let _scheme = hdr_field_try_get_single_val(headers, ":scheme")?;
-                let path = hdr_field_try_get_single_val(headers, ":path")?;
+                let method = hdr_field_try_get_single_val(&headers, ":method")?;
+                let _scheme = hdr_field_try_get_single_val(&headers, ":scheme")?;
+                let path = hdr_field_try_get_single_val(&headers, ":path")?;
 
-                if body.is_some() && !body.unwrap().is_empty() {}
+                
 
-                Ok(HTTPRequest::new(method, path, "HTTP/2"))
+                let mut req = HTTPRequest::new(method.as_str(), path.as_str(), "HTTP/2");
+                req.headers = headers;
+                req.body = body;
+                req.trailers = trailers;
+                Ok(req)
             }
             _ => Err(ErrorCode::ProtocolError),
         }
@@ -308,11 +312,11 @@ impl Stream {
 }
 
 /// Checks if field_name of hdr_map contains exactly one value. If true, return Some(value)
-fn hdr_field_try_get_single_val(hdr_map: HeadersMap, field_name: &str) -> Result<&str, ErrorCode> {
+fn hdr_field_try_get_single_val(hdr_map: &HeadersMap, field_name: &str) -> Result<String, ErrorCode> {
     let vals = hdr_map.get(field_name);
     match vals {
         Some(vals) => match vals {
-            HeaderVal::Single(val) => Ok(val),
+            HeaderVal::Single(val) => Ok(val.to_string()),
             _ => Err(ErrorCode::ProtocolError),
         },
         None => Err(ErrorCode::ProtocolError),
@@ -322,15 +326,11 @@ fn hdr_field_try_get_single_val(hdr_map: HeadersMap, field_name: &str) -> Result
 /// See https://httpwg.org/specs/rfc7541.html.
 pub fn compress_header(hdrs: &HeadersMap) -> Bytes {
     let mut encoder: Encoder<'_> = Encoder::new();
+
     let headers: Vec<(&[u8], &[u8])> = hdrs
         .into_iter()
         .map(|(key, value)| {
-            let key_bytes: &[u8] = key.as_bytes();
-            let value_byte: &[u8] = match value {
-                HeaderVal::Single(v) => v.as_bytes(),
-                HeaderVal::Multiple(v) => v.join(",").as_bytes(),
-            };
-            (key_bytes, value_byte)
+            (key.as_bytes(), value.as_bytes().clone().as_ref())
         })
         .collect();
     Bytes::from(encoder.encode(headers))
@@ -340,7 +340,7 @@ pub fn compress_header(hdrs: &HeadersMap) -> Bytes {
 /// See https://httpwg.org/specs/rfc7541.html.
 pub fn decompress_header(bytes: Bytes) -> Result<HeadersMap, ErrorCode> {
     let mut decoder: Decoder = Decoder::new();
-    match decoder.decode(&[0x82, 0x84]) {
+    match decoder.decode(&bytes) {
         Ok(header_list) => {
             let mut hdrs: HeadersMap = HeadersMap::new();
             for (key, value) in header_list {
@@ -369,7 +369,7 @@ mod tests {
         );
         hdrs.insert(String::from(":path"), HeaderVal::Single(String::from("/")));
 
-        let compressed: Bytes = compress_header(hdrs);
+        let compressed: Bytes = compress_header(&hdrs);
 
         // The headers are encoded by providing their index (with a bit flag
         // indicating that the indexed representation is used).
@@ -385,7 +385,7 @@ mod tests {
         );
         hdrs.insert(String::from(":path"), HeaderVal::Single(String::from("/")));
 
-        let compressed: Bytes = compress_header(hdrs);
+        let compressed: Bytes = compress_header(&hdrs);
         let decompressed: Result<HashMap<String, HeaderVal>, ErrorCode> =
             decompress_header(compressed);
 

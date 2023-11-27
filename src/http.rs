@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::mem;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 /// Calculate the size of an uncompressed headers list in octets(bytes).
 /// See https://httpwg.org/specs/rfc7540.html#SETTINGS_MAX_HEADER_LIST_SIZE.
@@ -32,6 +32,18 @@ pub fn hdr_map_size(hdr_map: &HeadersMap) -> usize {
 pub enum HeaderVal {
     Single(String),
     Multiple(Vec<String>),
+}
+impl HeaderVal {
+    pub fn as_bytes(&self) -> Bytes {
+        let mut bytes = BytesMut::new();
+        match self {
+            Self::Single(val) => bytes.extend_from_slice(val.as_bytes()),
+            Self::Multiple(vals) => {
+                bytes.extend_from_slice(vals.join(",").as_bytes())
+            }
+        }
+        bytes.into()
+    }
 }
 
 pub type HeadersMap = HashMap<String, HeaderVal>;
