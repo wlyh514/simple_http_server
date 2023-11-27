@@ -40,6 +40,7 @@ bitflags! {
 
 const FRAME_HDR_SIZE: usize = 24 + 8 + 8 + 32;
 /// See RFC7540 section 4
+#[derive(Clone)]
 struct FrameHeader {
     pub length: usize,
     frame_type: u8,
@@ -78,12 +79,14 @@ impl TryFrom<Bytes> for FrameHeader {
     }
 }
 
+#[derive(Clone)]
 pub struct SettingParam {
     pub identifier: SettingsIdentifier, 
     pub value: u32
 }
 
 /// See RFC7540 section 6
+#[derive(Clone)]
 pub enum FrameBody {
     Data {
         pad_length: usize,
@@ -352,6 +355,7 @@ impl FrameBody {
     }
 }
 
+#[derive(Clone)]
 pub struct Frame {
     pub header: FrameHeader,
     pub payload: FrameBody,

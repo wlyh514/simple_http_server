@@ -247,7 +247,8 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
     fn run_rx(&self, queue_tx: ResponseQueueTx, tcp_stream: TcpStream) {
         loop {
             let frame: Option<Frame> = {
-                let tcp_reader = BufReader::new(tcp_stream);
+                let tcp_stream_cp = tcp_stream.try_clone().unwrap();
+                let tcp_reader = BufReader::new(tcp_stream_cp);
                 Frame::try_read_from_buf(tcp_reader).ok()
             };
 
@@ -260,16 +261,12 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
             };
 
             let new_stream_required = false; // TODO: Implement this
-            let stream: Arc<Mutex<Stream>> = match new_stream_required {
-                true => {
-                    let new_stream = self.new_stream();
-                    let new_stream_id = new_stream.id;
-                    let mut active_streams = self.active_streams.lock().unwrap();
-                    active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
-                    *active_streams.get(&new_stream_id).unwrap()
-                }
-                false => *self.active_streams.lock().unwrap().get(&114514).unwrap(),
-            };
+            if new_stream_required {
+                let new_stream = self.new_stream();
+                let new_stream_id = new_stream.id;
+                let mut active_streams = self.active_streams.lock().unwrap();
+                active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
+            }
 
             let resp_frame: Result<Option<Frame>, ErrorCode> = match frame.payload {
                 // See section 6.5
@@ -288,7 +285,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                             }
                         } else {
                             // Update self.settings
-                            self.peer_settings.lock().unwrap().update_with_vec(settings);
+                            self.peer_settings.lock().unwrap().update_with_vec(&settings);
 
                             // Send ACK
                             let flag = SettingsFlags::ACK;
@@ -301,11 +298,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                     }
                 }
                 // Kill connection
-                FrameBody::GoAway {
-                    last_stream_id,
-                    error_code,
-                    additional_debug_data,
-                } => {
+                FrameBody::GoAway { .. } => {
                     break;
                 }
                 _ => Ok(None),
@@ -322,17 +315,25 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                 _ => {}
             }
 
-            let mut stream = stream.lock().unwrap();
-            match stream.recv(frame) {
-                Ok(Some(req)) => {
-                    let tx = queue_tx.clone();
-                    thread::spawn(|| self.handle_request(req, 114514, tx));
+            {
+                let active_streams = self.active_streams.lock().unwrap();
+                let mut stream = active_streams
+                    .get(&frame.header.stream_id)
+                    .unwrap()
+                    .lock()
+                    .unwrap();
+                match stream.recv(frame.clone()) {
+                    Ok(Some(req)) => {
+                        let tx = queue_tx.clone();
+                        thread::spawn(move || self.handle_request(req, frame.header.stream_id , tx));
+                    }
+                    Err(err) => {
+                        // Close connection if connection error
+                        println!("Connection closed with error code {:#?}", err);
+                        break;
+                    }
+                    _ => {}
                 }
-                Err(err) => {
-                    // Close connection if connection error
-                    break;
-                }
-                _ => {}
             }
         }
     }
@@ -435,8 +436,7 @@ pub struct SettingsMap(HashMap<u16, u32>);
 impl SettingsMap {
     /// Create a SettingsMap with default values
     pub fn default() -> Self {
-        let mut settings: HashMap<u16, u32> = HashMap::new();
-        let mut settings_map = Self(settings);
+        let mut settings_map = Self(HashMap::new());
 
         // Theses fields should ALWAYS exist within the lifespan of a SettingsMap
         settings_map.set(SettingsIdentifier::HeaderTableSize, 4096);
@@ -465,9 +465,9 @@ impl SettingsMap {
         }
     }
 
-    pub fn update_with_vec(&mut self, other: Vec<SettingParam>) {
+    pub fn update_with_vec(&mut self, other: &Vec<SettingParam>) {
         for setting in other {
-            self.0.insert(setting.identifier as u16, setting.value);
+            self.0.insert(setting.identifier.clone() as u16, setting.value);
         }
     }
 }
