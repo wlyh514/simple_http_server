@@ -5,9 +5,9 @@ use bytes::Bytes;
 
 /// Calculate the size of an uncompressed headers list in octets(bytes).
 /// See https://httpwg.org/specs/rfc7540.html#SETTINGS_MAX_HEADER_LIST_SIZE.
-pub fn hdr_map_size(hdr_map: HeadersMap) -> usize {
+pub fn hdr_map_size(hdr_map: &HeadersMap) -> usize {
     let mut size: usize = 0;
-    for (key, value) in &hdr_map {
+    for (key, value) in hdr_map {
         // 32 octet overhead for each entry.
         size += 32;
 
@@ -28,7 +28,7 @@ pub fn hdr_map_size(hdr_map: HeadersMap) -> usize {
     size
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum HeaderVal {
     Single(String),
     Multiple(Vec<String>),
@@ -169,15 +169,15 @@ mod tests {
         let header_name_9 = String::from("User-Agent");
         let header_value_9 = HeaderVal::Single(String::from("Chrome/51.0.2704.103"));
 
-        hdr_map.insert(header_name_1, header_value_1);
-        hdr_map.insert(header_name_2, header_value_2);
-        hdr_map.insert(header_name_3, header_value_3);
-        hdr_map.insert(header_name_4, header_value_4);
-        hdr_map.insert(header_name_5, header_value_5);
-        hdr_map.insert(header_name_6, haader_value_6);
-        hdr_map.insert(header_name_7, header_value_7);
-        hdr_map.insert(header_name_8, header_value_8);
-        hdr_map.insert(header_name_9, header_value_9);
+        hdr_map.insert(header_name_1.clone(), header_value_1.clone());
+        hdr_map.insert(header_name_2.clone(), header_value_2.clone());
+        hdr_map.insert(header_name_3.clone(), header_value_3.clone());
+        hdr_map.insert(header_name_4.clone(), header_value_4.clone());
+        hdr_map.insert(header_name_5.clone(), header_value_5.clone());
+        hdr_map.insert(header_name_6.clone(), haader_value_6.clone());
+        hdr_map.insert(header_name_7.clone(), header_value_7.clone());
+        hdr_map.insert(header_name_8.clone(), header_value_8.clone());
+        hdr_map.insert(header_name_9.clone(), header_value_9.clone());
 
         let actual_size = mem::size_of_val(&header_name_1)
             + mem::size_of_val(&header_value_1)
@@ -199,6 +199,6 @@ mod tests {
             + mem::size_of_val(&header_value_9)
             + 32 * 9;
 
-        assert_eq!(hdr_map_size(hdr_map), actual_size);
+        assert_eq!(hdr_map_size(&hdr_map), actual_size);
     }
 }

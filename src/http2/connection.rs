@@ -1,14 +1,28 @@
+use ::num_enum::{IntoPrimitive, TryFromPrimitive};
 use bytes::Bytes;
-use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
-use crate::http::{ReqHandlerFn, HTTPRequest, HTTPResponse, hdr_map_size, HeaderVal};
+use crate::{
+    http::{hdr_map_size, HTTPRequest, HTTPResponse, HeaderVal, ReqHandlerFn},
+    http2::stream::StreamState,
+};
 
-use super::{frames::{Frame, SettingParam, FrameBody, HeadersFlags, ContinuationFlags, DataFlags, ErrorCode, SettingsFlags}, stream::{Stream, compress_header}};
-use std::io::{Write, BufReader};
-use ::std::{collections::HashMap, net::TcpStream, thread, sync::{Arc, Mutex, mpsc}};
+use super::{
+    frames::{
+        ContinuationFlags, DataFlags, ErrorCode, Frame, FrameBody, HeadersFlags, SettingParam,
+        SettingsFlags,
+    },
+    stream::{compress_header, Stream},
+};
+use ::std::{
+    collections::HashMap,
+    io::{BufReader, Write},
+    net::TcpStream,
+    sync::{mpsc, Arc, Mutex, atomic::{AtomicU32, Ordering}},
+    thread,
+};
 
 enum ResponseQueueError {
-    Terminated
+    Terminated,
 }
 struct ResponseQueueRx(mpsc::Receiver<Frame>);
 #[derive(Clone)]
@@ -30,75 +44,113 @@ impl ResponseQueueTx {
     }
 
     pub fn push(&self, frame: Frame) {
-        match self.0.send(frame) { _ => () }
+        match self.0.send(frame) {
+            _ => (),
+        }
     }
 }
 
 pub struct Connection<T: ReqHandlerFn + Sync> {
-    tcp_stream: TcpStream,
     peer_settings: Arc<Mutex<SettingsMap>>,
-    stream_counter: u32,
-    active_streams: Arc<Mutex<HashMap<u32, Stream>>>,
-    handler: T
+    /// max(id of every existed stream) + 1
+    stream_counter: Arc<AtomicU32>,
+    active_streams: Arc<Mutex<HashMap<u32, Arc<Mutex<Stream>>>>>,
+    handler: T,
 }
 
 impl<T: ReqHandlerFn + Sync> Connection<T> {
-    pub fn new(tcp_stream: TcpStream, handler: T, peer_settings_params: Vec<SettingParam>) -> Connection<T> {
+    pub fn new(
+        handler: T,
+        peer_settings_params: Vec<SettingParam>,
+    ) -> Connection<T> {
         Connection {
-            tcp_stream,
             peer_settings: Arc::new(Mutex::new(SettingsMap::from(peer_settings_params))),
-            stream_counter: 1,
+            stream_counter: Arc::new(AtomicU32::new(1)),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
             handler,
         }
     }
 
-    fn new_stream(&mut self) -> Stream {
-        // TODO: Implement this
+    fn new_stream_with_id(&self, new_id: u32) -> Stream {
+        let stream_counter = self.stream_counter.load(Ordering::SeqCst);
+        assert!(new_id >= stream_counter);
+        let new_stream = Stream::new(new_id);
+
+        {
+            // Close all idle streams with id smaller than the new stream
+            let mut active_streams = self.active_streams.lock().unwrap();
+            let mut streams_to_close: Vec<u32> = vec![];
+            for (id, stream) in active_streams.iter() {
+                let stream = stream.lock().unwrap();
+                if stream.state == StreamState::Idle {
+                    streams_to_close.push(*id);
+                }
+            }
+            for id in streams_to_close {
+                active_streams.remove(&id);
+            }
+        }
+
+        self.stream_counter.store(new_id, Ordering::SeqCst);
+        new_stream
     }
 
-    /// Convert a http response into frames to be sent. 
+    fn new_stream(&self) -> Stream {
+        let next_stream_id = self.stream_counter.load(Ordering::SeqCst);
+        self.new_stream_with_id(next_stream_id)
+    }
+
+    /// Convert a http response into frames to be sent.
     fn make_frames(&self, stream_id: u32, mut response: HTTPResponse) -> Result<Vec<Frame>, ()> {
-        let stream = self.active_streams.lock().unwrap().get(&stream_id).map_or(Err(()), |val| Ok(val))?;
-        
+        let active_streams = self.active_streams.lock().unwrap();
+        let stream = active_streams
+            .get(&stream_id)
+            .map_or(Err(()), |val| Ok(val))?
+            .lock()
+            .unwrap();
+
         // Write response pseudoheaders
         let status_code: u32 = response.status as u32;
-        response.headers.insert(":status".to_string(), HeaderVal::Single(status_code.to_string()));
+        response.headers.insert(
+            ":status".to_string(),
+            HeaderVal::Single(status_code.to_string()),
+        );
 
-        let header_bytes = compress_header(response.headers);
-        
+        let header_bytes = compress_header(&response.headers);
+
         // Load relavent settings
-        let mut hdr_partition_size: usize; 
-        let mut body_partition_size: usize;
-        let mut max_hdr_size: usize;
+        let hdr_partition_size: usize;
+        let body_partition_size: usize;
+        let max_hdr_size: usize;
         {
-            let settings = self.peer_settings.lock().unwrap(); 
-            let frame_partition_size = settings.get(SettingsIdentifier::MaxFrameSize).unwrap() as usize;
-            hdr_partition_size = settings.get(SettingsIdentifier::HeaderTableSize).unwrap() as usize;
+            let settings = self.peer_settings.lock().unwrap();
+            let frame_partition_size =
+                settings.get(SettingsIdentifier::MaxFrameSize).unwrap() as usize;
+            hdr_partition_size = usize::min(
+                settings.get(SettingsIdentifier::HeaderTableSize).unwrap() as usize,
+                frame_partition_size,
+            );
             max_hdr_size = settings.get(SettingsIdentifier::MaxHeaderListSize).unwrap() as usize;
 
-            if hdr_partition_size > frame_partition_size {
-                hdr_partition_size = frame_partition_size;
-            }
             body_partition_size = frame_partition_size - 8;
         }
-        if max_hdr_size < hdr_map_size(response.headers) {
+        if max_hdr_size < hdr_map_size(&response.headers) {
             Err(())
         } else {
-            let mut frames: Vec<Frame> = vec![]; 
+            let mut frames: Vec<Frame> = vec![];
             let mut hdr_remaining_bytes = header_bytes.len();
-            
+
             // Header frames
             while hdr_remaining_bytes > 0 {
                 let mut bytes_taken = usize::min(hdr_remaining_bytes, hdr_partition_size);
 
                 // First header frame
                 if hdr_remaining_bytes == header_bytes.len() {
-                    let mut flags = HeadersFlags::from_bits_retain(0);  
+                    let mut flags = HeadersFlags::from_bits_retain(0);
 
                     let first_frag_size = hdr_partition_size - 8 - 32 - 8;
                     bytes_taken = usize::min(bytes_taken, first_frag_size);
-                    
+
                     if hdr_remaining_bytes < first_frag_size {
                         if response.body.is_none() {
                             flags &= HeadersFlags::END_STREAM;
@@ -107,7 +159,17 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                         }
                     }
 
-                    frames.push(Frame::new(stream.id, flags.bits(), FrameBody::Headers { pad_length: 0, e: false, stream_dep: 0, weight: 0, hdr_block_frag: header_bytes.slice(..bytes_taken) }));
+                    frames.push(Frame::new(
+                        stream.id,
+                        flags.bits(),
+                        FrameBody::Headers {
+                            pad_length: 0,
+                            e: false,
+                            stream_dep: 0,
+                            weight: 0,
+                            hdr_block_frag: header_bytes.slice(..bytes_taken),
+                        },
+                    ));
                 } else {
                     let mut flags = ContinuationFlags::from_bits_retain(0);
 
@@ -115,7 +177,13 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                         flags &= ContinuationFlags::END_HEADERS;
                     }
 
-                    frames.push(Frame::new(stream_id, flags.bits(), FrameBody::Continuation { hdr_block_frag: header_bytes.slice(..bytes_taken)}));
+                    frames.push(Frame::new(
+                        stream_id,
+                        flags.bits(),
+                        FrameBody::Continuation {
+                            hdr_block_frag: header_bytes.slice(..bytes_taken),
+                        },
+                    ));
                 }
 
                 hdr_remaining_bytes -= bytes_taken;
@@ -132,7 +200,14 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                         flags &= DataFlags::END_STREAM;
                     }
 
-                    frames.push(Frame::new(stream_id, flags.bits(), FrameBody::Data { pad_length: 0, data: body_bytes.slice(..bytes_taken) }));
+                    frames.push(Frame::new(
+                        stream_id,
+                        flags.bits(),
+                        FrameBody::Data {
+                            pad_length: 0,
+                            data: body_bytes.slice(..bytes_taken),
+                        },
+                    ));
 
                     body_remaining_bytes -= bytes_taken;
                 }
@@ -142,11 +217,17 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
         }
     }
 
-    /// Send a frame and update the frame's state machine accordingly. 
-    fn send_frame(&self, frame: Frame, mut stream: Stream) -> Result<(), ()> {
-        stream.send(frame);
+    /// Send a frame and update the frame's state machine accordingly.
+    fn send_frame(&self, frame: Frame, stream_id: u32, mut tcp_stream: TcpStream) -> Result<(), ()> {
+        let active_streams = self.active_streams.lock().unwrap();
+        let mut stream = active_streams
+            .get(&stream_id)
+            .ok_or(())?
+            .lock()
+            .unwrap();
+        stream.send(&frame);
         let frame_bytes: Bytes = frame.try_into().map_err(|_| ())?;
-        self.tcp_stream.write_all(&frame_bytes);
+        tcp_stream.write_all(&frame_bytes);
 
         Ok(())
     }
@@ -158,19 +239,16 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                 for frame in frames {
                     queue_tx.push(frame)
                 }
-            },
-            Err(_) => ()
+            }
+            Err(_) => (),
         }
     }
 
-    fn run_rx(&self, queue_tx: ResponseQueueTx) {
+    fn run_rx(&self, queue_tx: ResponseQueueTx, tcp_stream: TcpStream) {
         loop {
-            let frame: Option<Frame> = match self.tcp_stream.try_clone() {
-                Ok(tcp_stream) => {
-                    let tcp_reader = BufReader::new(tcp_stream);
-                    Frame::try_read_from_buf(tcp_reader).ok()
-                },
-                _ => None
+            let frame: Option<Frame> = {
+                let tcp_reader = BufReader::new(tcp_stream);
+                Frame::try_read_from_buf(tcp_reader).ok()
             };
 
             let frame = match frame {
@@ -181,19 +259,19 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                 }
             };
 
-            let new_stream_required = false;        // TODO: Implement this
-            let mut stream: Stream = match new_stream_required {
+            let new_stream_required = false; // TODO: Implement this
+            let stream: Arc<Mutex<Stream>> = match new_stream_required {
                 true => {
                     let new_stream = self.new_stream();
-                    self.active_streams.lock().unwrap().insert(new_stream.id, new_stream);
-                    new_stream
-                }, 
-                false => {
-                    *self.active_streams.lock().unwrap().get(&114514).unwrap()
-                },
+                    let new_stream_id = new_stream.id;
+                    let mut active_streams = self.active_streams.lock().unwrap();
+                    active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
+                    *active_streams.get(&new_stream_id).unwrap()
+                }
+                false => *self.active_streams.lock().unwrap().get(&114514).unwrap(),
             };
 
-            let resp_frame: Result<Option<Frame>, ErrorCode>  = match frame.payload {
+            let resp_frame: Result<Option<Frame>, ErrorCode> = match frame.payload {
                 // See section 6.5
                 FrameBody::Settings(settings) => {
                     let flags = SettingsFlags::from_bits_retain(frame.header.flags);
@@ -211,76 +289,106 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                         } else {
                             // Update self.settings
                             self.peer_settings.lock().unwrap().update_with_vec(settings);
-                            
+
                             // Send ACK
                             let flag = SettingsFlags::ACK;
-                            Ok(Some(Frame::new(0, flag.bits(), FrameBody::Settings(vec![]))))
+                            Ok(Some(Frame::new(
+                                0,
+                                flag.bits(),
+                                FrameBody::Settings(vec![]),
+                            )))
                         }
                     }
-                },
+                }
                 // Kill connection
-                FrameBody::GoAway { last_stream_id, error_code, additional_debug_data } => {
+                FrameBody::GoAway {
+                    last_stream_id,
+                    error_code,
+                    additional_debug_data,
+                } => {
                     break;
                 }
-                _ => Ok(None), 
-            }; 
+                _ => Ok(None),
+            };
 
             match resp_frame {
                 Ok(Some(resp_frame)) => {
                     queue_tx.push(resp_frame);
-                },
+                }
                 Err(error_code) => {
                     self.close_with_error(error_code, frame.header.stream_id, queue_tx);
                     break;
-                },
-                _ => {},
+                }
+                _ => {}
             }
 
+            let mut stream = stream.lock().unwrap();
             match stream.recv(frame) {
                 Ok(Some(req)) => {
                     let tx = queue_tx.clone();
                     thread::spawn(|| self.handle_request(req, 114514, tx));
-                }, 
+                }
                 Err(err) => {
                     // Close connection if connection error
                     break;
-                },
+                }
                 _ => {}
             }
         }
     }
 
-    fn run_tx(&self, queue_rx: ResponseQueueRx) {
+    fn run_tx(&self, queue_rx: ResponseQueueRx, tcp_stream: TcpStream) {
         loop {
             let frame = match queue_rx.pop() {
-                Ok(tagged_resp) => { tagged_resp },
-                Err(_) => { break; }
+                Ok(tagged_resp) => tagged_resp,
+                Err(_) => {
+                    break;
+                }
             };
-            if let Some(stream) = self.active_streams.lock().unwrap().get(&frame.header.stream_id) {
-                self.send_frame(frame, *stream);
+            let frame_id = frame.header.stream_id;
+            if let Ok(tcp_stream_cp) = tcp_stream.try_clone() {
+                self.send_frame(frame, frame_id, tcp_stream_cp);
             }
         }
     }
 
-    fn close_with_error(&mut self, error_code: ErrorCode, last_stream_id: u32, queue_tx: ResponseQueueTx) {
-        let frame: Frame = Frame::new(0, 0, FrameBody::GoAway { last_stream_id, error_code, additional_debug_data: Bytes::new() });
+    fn close_with_error(
+        &self,
+        error_code: ErrorCode,
+        last_stream_id: u32,
+        queue_tx: ResponseQueueTx,
+    ) {
+        let frame: Frame = Frame::new(
+            0,
+            0,
+            FrameBody::GoAway {
+                last_stream_id,
+                error_code,
+                additional_debug_data: Bytes::new(),
+            },
+        );
         queue_tx.push(frame);
     }
 
-    pub fn run(&self) {
+    pub fn run(&self, tcp_stream: TcpStream) -> Option<()> {
+        let tcp_stream_cp = tcp_stream.try_clone().ok()?;
         let (tx, rx) = mpsc::channel();
         let queue_tx = ResponseQueueTx::new(tx);
         let queue_rx = ResponseQueueRx::new(rx);
-        let rx_handle = thread::spawn(move || self.run_rx(queue_tx));
-        let tx_handle = thread::spawn(move || self.run_tx(queue_rx));
+        let rx_handle = thread::spawn(move || {
+            
+            self.run_rx(queue_tx, tcp_stream_cp)
+        });
+        let tx_handle = thread::spawn(move || self.run_tx(queue_rx, tcp_stream));
         rx_handle.join();
         tx_handle.join();
+        None
     }
 }
 
 /// See RFC7540 section 6.5
 #[repr(u16)]
-#[derive(TryFromPrimitive, IntoPrimitive, Eq, PartialEq, Debug)]
+#[derive(TryFromPrimitive, IntoPrimitive, Eq, PartialEq, Debug, Clone)]
 pub enum SettingsIdentifier {
     HeaderTableSize = 0x1,
     EnablePush = 0x2,
@@ -292,9 +400,24 @@ pub enum SettingsIdentifier {
 impl SettingsIdentifier {
     pub fn is_valid_value(&self, value: u32) -> Result<u32, ErrorCode> {
         const VALID_RANGES: [(SettingsIdentifier, u32, u32, ErrorCode); 3] = [
-            (SettingsIdentifier::EnablePush, 0, 1, ErrorCode::ProtocolError),
-            (SettingsIdentifier::InitialWindowSize, 0, 2147483647, ErrorCode::FlowControlError),
-            (SettingsIdentifier::MaxFrameSize, 16384, 16777215, ErrorCode::ProtocolError)
+            (
+                SettingsIdentifier::EnablePush,
+                0,
+                1,
+                ErrorCode::ProtocolError,
+            ),
+            (
+                SettingsIdentifier::InitialWindowSize,
+                0,
+                2147483647,
+                ErrorCode::FlowControlError,
+            ),
+            (
+                SettingsIdentifier::MaxFrameSize,
+                16384,
+                16777215,
+                ErrorCode::ProtocolError,
+            ),
         ];
         match VALID_RANGES.iter().find(|entry| entry.0 == *self) {
             Some((identifier, min, max, errorCode)) => {
@@ -304,18 +427,18 @@ impl SettingsIdentifier {
                     Err(errorCode.clone())
                 }
             }
-            None => Ok(value)
+            None => Ok(value),
         }
     }
 }
-pub struct SettingsMap (HashMap<u16, u32>);
+pub struct SettingsMap(HashMap<u16, u32>);
 impl SettingsMap {
     /// Create a SettingsMap with default values
     pub fn default() -> Self {
         let mut settings: HashMap<u16, u32> = HashMap::new();
         let mut settings_map = Self(settings);
-        
-        // Theses fields should ALWAYS exist within the lifespan of a SettingsMap 
+
+        // Theses fields should ALWAYS exist within the lifespan of a SettingsMap
         settings_map.set(SettingsIdentifier::HeaderTableSize, 4096);
         settings_map.set(SettingsIdentifier::EnablePush, 1);
         settings_map.set(SettingsIdentifier::MaxConcurrentStreams, 128);
@@ -327,7 +450,8 @@ impl SettingsMap {
     }
 
     pub fn set(&mut self, identifier: SettingsIdentifier, value: u32) -> Result<(), ErrorCode> {
-        self.0.insert(identifier as u16, identifier.is_valid_value(value)?);
+        self.0
+            .insert(identifier.clone() as u16, identifier.is_valid_value(value)?);
         Ok(())
     }
 
@@ -360,7 +484,10 @@ impl Into<Vec<SettingParam>> for SettingsMap {
     fn into(self) -> Vec<SettingParam> {
         let mut params: Vec<SettingParam> = vec![];
         for (key, value) in self.0 {
-            params.push(SettingParam { identifier: key.try_into().unwrap(), value });
+            params.push(SettingParam {
+                identifier: key.try_into().unwrap(),
+                value,
+            });
         }
         params
     }

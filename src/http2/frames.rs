@@ -47,7 +47,7 @@ struct FrameHeader {
     pub stream_id: u32,
 }
 impl FrameHeader {
-    fn put_buf(self, mut buf: BytesMut) {
+    fn put_buf(self, buf: &mut BytesMut) {
         // Write length as u24 in big endian
         buf.put_u8(((self.length >> 16) & 0xff) as u8);
         buf.put_u8(((self.length >> 8) & 0xff) as u8);
@@ -59,11 +59,11 @@ impl FrameHeader {
     }
 }
 impl TryFrom<Bytes> for FrameHeader {
-    type Error = &'static str;
+    type Error = error::HeaderSerializationError;
 
     fn try_from(mut buf: Bytes) -> Result<Self, Self::Error> {
         if buf.len() > 9 {
-            return Err("Buffer is too short");
+            return Err(Self::Error::BufferTooSmall);
         }
         let length: usize = ((buf.get_u8() as usize) << 16) | ((buf.get_u8() as usize) << 8) | (buf.get_u8() as usize);
         let frame_type = buf.get_u8(); 
@@ -71,10 +71,10 @@ impl TryFrom<Bytes> for FrameHeader {
         let stream_id = buf.get_u32() & 0x7fff_ffff;
         
         if frame_type > 0x9 {
-            return Err(format!("Unsupported type: {}", frame_type).as_str())
+            Err(Self::Error::UnknownFrameType(frame_type))
+        } else {
+            Ok(Self {length, frame_type, flags, stream_id})
         }
-
-        Ok(Self {length, frame_type, flags, stream_id})
     }
 }
 
@@ -126,7 +126,7 @@ pub enum FrameBody {
     },
 }
 impl FrameBody {
-    fn to_id(self) -> u8 {
+    fn get_id(&self) -> u8 {
         match self {
             Self::Data { .. } => 0x0,
             Self::Headers { .. } => 0x1,
@@ -142,7 +142,7 @@ impl FrameBody {
     }
 
     /// Errors if hdr_block_frag failed to compress
-    fn size(self) -> usize {
+    fn size(&self) -> usize {
         match self {
             Self::Data { pad_length, data } => {
                 8 + data.len() + pad_length
@@ -178,7 +178,7 @@ impl FrameBody {
     }
 
     /// Serialization
-    fn try_put_buf(self, mut buf: BytesMut) -> Result<(), &'static str> {
+    fn try_put_buf(self, buf: &mut BytesMut) -> Result<(), &'static str> {
         match self {
             Self::Data { pad_length, data } => {
                 buf.put_u8(pad_length.try_into().unwrap());
@@ -270,7 +270,7 @@ impl FrameBody {
     }
 
     /// Deserialization
-    fn try_from_buf(mut buf: Bytes, hdr: &FrameHeader) -> Result<Self, &'static str> {
+    fn try_from_buf(mut buf: Bytes, hdr: &FrameHeader) -> Result<Self, error::BodySerializationError> {
         match hdr.frame_type {
             0x0 => {
                 let pad_length: usize = buf.get_u8().into();
@@ -300,15 +300,19 @@ impl FrameBody {
                 Ok(Self::Priority { e, stream_dep, weight })
             },
             0x3 => {
-                let error_code = buf.get_u32(); 
-                let error_code: ErrorCode = error_code.try_into().map_err(|_| "Unknown error code")?;
-                Ok(Self::RstStream { error_code })
+                let error_code = buf.get_u32();
+                match error_code.try_into() {
+                    Ok(error_code) => Ok(Self::RstStream { error_code }),
+                    Err(_) => Err(error::BodySerializationError::UnknownErrorCode(error_code)),
+                }
             },
             0x4 => {
                 let mut remaining_size: usize = hdr.length;
                 let mut setting_params: Vec<SettingParam> = vec![];
                 while remaining_size >= 48 {
-                    let identifier: SettingsIdentifier = buf.get_u16().try_into().map_err(|_| "Unknown settings identifier")?;
+                    let identifier = buf.get_u16();
+                    let identifier: SettingsIdentifier = identifier.try_into()
+                        .map_err(|_| error::BodySerializationError::UnknownSettingsIdentifier(identifier))?;
                     let value = buf.get_u32();
 
                     setting_params.push(SettingParam { identifier, value });
@@ -329,7 +333,9 @@ impl FrameBody {
             },
             0x7 => {
                 let last_stream_id = buf.get_u32() & 0x7fff_ffff;
-                let error_code: ErrorCode = buf.get_u32().try_into().map_err(|_| "Unknown error code")?;
+                let error_code = buf.get_u32();
+                let error_code: ErrorCode = error_code.try_into()
+                    .map_err(|_| error::BodySerializationError::UnknownErrorCode(error_code))?;
                 let additional_debug_data = buf.slice(..(hdr.length - 32 - 32));
                 Ok(Self::GoAway { last_stream_id, error_code, additional_debug_data })
             },
@@ -341,7 +347,7 @@ impl FrameBody {
                 let hdr_block_frag = buf.slice(..hdr.length);
                 Ok(Self::Continuation { hdr_block_frag })
             },
-            _ => Err("Unknown frame type")
+            _ => panic!("Header frame_type should be validated at this point. ")
         }
     }
 }
@@ -356,7 +362,7 @@ impl Frame {
         Self {
             header: FrameHeader {
                 length: body_size,
-                frame_type: payload.to_id(),
+                frame_type: payload.get_id(),
                 flags,
                 stream_id,
             },
@@ -365,7 +371,7 @@ impl Frame {
     }
 
     /// A frame must be verified before serialized and sent. 
-    pub fn validate(self) -> Result<(), &'static str> {
+    pub fn validate(&self) -> Result<(), &'static str> {
         let payload_len = self.payload.size();
         if payload_len != self.header.length {
             return Err("Incorrect FrameHeader.length")
@@ -378,18 +384,20 @@ impl Frame {
     }
 
     /// Deserialization
-    pub fn try_read_from_buf(mut buf_reader: BufReader<TcpStream>) -> Result<Frame, &'static str> {
+    pub fn try_read_from_buf(mut buf_reader: BufReader<TcpStream>) -> Result<Frame, error::SerializationError> {
         let mut header_buf = BytesMut::with_capacity(9);
         // Read frame header
         buf_reader.read_exact(&mut header_buf);
-        let mut header_buf: Bytes = header_buf.into();
-        let header = FrameHeader::try_from(header_buf)?;
+        let header_buf: Bytes = header_buf.into();
+        let header = FrameHeader::try_from(header_buf)
+            .map_err(|err| error::SerializationError::Header(err))?;
 
         let mut payload_buf = BytesMut::with_capacity(header.length);
         buf_reader.read_exact(&mut payload_buf);
-        let mut payload_buf: Bytes = payload_buf.into();
+        let payload_buf: Bytes = payload_buf.into();
         
-        let payload = FrameBody::try_from_buf(payload_buf, &header)?;
+        let payload = FrameBody::try_from_buf(payload_buf, &header)
+            .map_err(|err| error::SerializationError::Body(err))?;
         Ok(Self { header, payload })
     }
 }
@@ -399,8 +407,8 @@ impl TryInto<Bytes> for Frame {
 
     fn try_into(self) -> Result<Bytes, Self::Error> {
         let mut buf = BytesMut::with_capacity(FRAME_HDR_SIZE + self.header.length);
-        self.header.put_buf(buf);
-        self.payload.try_put_buf(buf)?;
+        self.header.put_buf(&mut buf);
+        self.payload.try_put_buf(&mut buf)?;
         Ok(buf.into())
     }
 }
@@ -422,4 +430,24 @@ pub enum ErrorCode {
     EnhanceYourCalm = 0xb,
     InadequateSecurity = 0xc,
     HTTP1_1Required = 0xd,
+}
+
+mod error {
+    #[derive(Debug)]
+    pub enum HeaderSerializationError {
+        BufferTooSmall, 
+        UnknownFrameType(u8),
+    }
+
+    #[derive(Debug)]
+    pub enum BodySerializationError {
+        UnknownErrorCode(u32), 
+        UnknownSettingsIdentifier(u16),
+    }
+
+    #[derive(Debug)]
+    pub enum SerializationError {
+        Header(HeaderSerializationError),
+        Body(BodySerializationError)
+    }
 }

@@ -8,11 +8,11 @@ use crate::http::ReqHandlerFn;
 use super::{connection::{Connection, SettingsMap}, frames::{Frame, FrameBody}};
 
 
-pub struct Server<T: ReqHandlerFn + Sync + Send> {
+pub struct Server<T: ReqHandlerFn + Sync + Send + Copy + 'static> {
     handler: T,
 }
 
-impl<T: ReqHandlerFn + Sync + Send> Server<T> {
+impl<T: ReqHandlerFn + Sync + Send + Copy> Server<T> {
     pub fn new(handler: T) -> Self {
         Self { handler }
     }
@@ -22,9 +22,9 @@ impl<T: ReqHandlerFn + Sync + Send> Server<T> {
         // TRY TODO: Support other starting methods
 
         // Receive a preface
-        let mut read_stream = stream.try_clone().ok()?;
+        let read_stream = stream.try_clone().ok()?;
         let mut reader = BufReader::new(read_stream);
-        let mut preface_starter: [u8; 24];
+        let mut preface_starter = [0; 24];
         reader.read_exact(&mut preface_starter);
         let preface_starter = String::from_utf8(preface_starter.into()).ok()?;
         if preface_starter != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
@@ -52,8 +52,8 @@ impl<T: ReqHandlerFn + Sync + Send> Server<T> {
         stream.write_all(&server_preface_bytes);
 
         // Create connection struct
-        let connection = Connection::new(stream, self.handler, settings);
-        thread::spawn(move || connection.run() /* Maybe kill connection afterwards? */);
+        let connection = Connection::new(self.handler.clone(), settings);
+        thread::spawn(move || connection.run(stream) /* Maybe kill connection afterwards? */);
         None
     }
 }
@@ -62,11 +62,11 @@ mod test {
     use crate::http::{HTTPRequest, HTTPResponse};
     use super::Server;
 
-    fn sample_handler(request: HTTPRequest) -> HTTPResponse {
+    fn sample_handler(_: HTTPRequest) -> HTTPResponse {
         HTTPResponse::default()
     }
 
     fn test_traits() {
-        let server = Server::new(sample_handler);
+        let _server = Server::new(sample_handler);
     }
 }

@@ -10,10 +10,11 @@ use hpack::Encoder;
 /// Maintains a state machine and a vector of received frames
 pub struct Stream {
     pub id: u32,
-    state: StreamState,
+    pub state: StreamState,
     received_frames: Vec<Frame>,
 }
-enum StreamState {
+#[derive(PartialEq)]
+pub enum StreamState {
     Idle,
     Open,
     ReservedLocal,
@@ -232,7 +233,7 @@ impl Stream {
         }
     }
 
-    pub fn send(&mut self, frame: Frame) {
+    pub fn send(&mut self, frame: &Frame) {
         let end_of_stream: bool = match frame.payload {
             FrameBody::Headers { .. } => {
                 let hdr_flags: HeadersFlags = HeadersFlags::from_bits_retain(frame.header.flags);
@@ -319,7 +320,7 @@ fn hdr_field_try_get_single_val(hdr_map: HeadersMap, field_name: &str) -> Result
 }
 /// Compress headers using HPACK.
 /// See https://httpwg.org/specs/rfc7541.html.
-pub fn compress_header(hdrs: HeadersMap) -> Bytes {
+pub fn compress_header(hdrs: &HeadersMap) -> Bytes {
     let mut encoder: Encoder<'_> = Encoder::new();
     let headers: Vec<(&[u8], &[u8])> = hdrs
         .into_iter()
