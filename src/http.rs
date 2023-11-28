@@ -48,8 +48,8 @@ impl HeaderVal {
 
 pub type HeadersMap = HashMap<String, HeaderVal>;
 
-pub trait ReqHandlerFn: Fn(HTTPRequest) -> HTTPResponse {}
-impl<F: Fn(HTTPRequest) -> HTTPResponse> ReqHandlerFn for F {}
+pub trait ReqHandlerFn: Fn(HTTPRequest) -> HTTPResponse + Sync + Send {}
+impl<F: Fn(HTTPRequest) -> HTTPResponse + Sync + Send> ReqHandlerFn for F {}
 
 pub struct HTTPRequest {
     pub method: String,

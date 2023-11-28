@@ -41,7 +41,7 @@ bitflags! {
 const FRAME_HDR_SIZE: usize = 24 + 8 + 8 + 32;
 /// See RFC7540 section 4
 #[derive(Clone)]
-struct FrameHeader {
+pub struct FrameHeader {
     pub length: usize,
     frame_type: u8,
     pub flags: u8,
@@ -391,13 +391,14 @@ impl Frame {
     pub fn try_read_from_buf(mut buf_reader: BufReader<TcpStream>) -> Result<Frame, error::SerializationError> {
         let mut header_buf = BytesMut::with_capacity(9);
         // Read frame header
-        buf_reader.read_exact(&mut header_buf);
+        buf_reader.read_exact(&mut header_buf).map_err(|_| error::SerializationError::BufReaderError)?;
         let header_buf: Bytes = header_buf.into();
+        println!("{:#?}", header_buf); //TODO: FIX this, this is empty
         let header = FrameHeader::try_from(header_buf)
             .map_err(|err| error::SerializationError::Header(err))?;
 
         let mut payload_buf = BytesMut::with_capacity(header.length);
-        buf_reader.read_exact(&mut payload_buf);
+        buf_reader.read_exact(&mut payload_buf).map_err(|_| error::SerializationError::BufReaderError)?;
         let payload_buf: Bytes = payload_buf.into();
         
         let payload = FrameBody::try_from_buf(payload_buf, &header)
@@ -452,6 +453,7 @@ mod error {
     #[derive(Debug)]
     pub enum SerializationError {
         Header(HeaderSerializationError),
-        Body(BodySerializationError)
+        Body(BodySerializationError),
+        BufReaderError,
     }
 }

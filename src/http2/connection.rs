@@ -50,7 +50,8 @@ impl ResponseQueueTx {
     }
 }
 
-pub struct Connection<T: ReqHandlerFn + Sync> {
+#[derive(Clone)]
+pub struct Connection<T: ReqHandlerFn + Copy> {
     peer_settings: Arc<Mutex<SettingsMap>>,
     /// max(id of every existed stream) + 1
     stream_counter: Arc<AtomicU32>,
@@ -58,7 +59,7 @@ pub struct Connection<T: ReqHandlerFn + Sync> {
     handler: T,
 }
 
-impl<T: ReqHandlerFn + Sync> Connection<T> {
+impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     pub fn new(
         handler: T,
         peer_settings_params: Vec<SettingParam>,
@@ -227,7 +228,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
             .unwrap();
         stream.send(&frame);
         let frame_bytes: Bytes = frame.try_into().map_err(|_| ())?;
-        tcp_stream.write_all(&frame_bytes);
+        let _ = tcp_stream.write_all(&frame_bytes);
 
         Ok(())
     }
@@ -244,7 +245,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
         }
     }
 
-    fn run_rx(&self, queue_tx: ResponseQueueTx, tcp_stream: TcpStream) {
+    fn run_rx(connection: Arc<Self>, queue_tx: ResponseQueueTx, tcp_stream: TcpStream) {
         loop {
             let frame: Option<Frame> = {
                 let tcp_stream_cp = tcp_stream.try_clone().unwrap();
@@ -255,20 +256,20 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
             let frame = match frame {
                 Some(frame) => frame,
                 None => {
-                    self.close_with_error(ErrorCode::ProtocolError, 0, queue_tx.clone());
+                    connection.close_with_error(ErrorCode::ProtocolError, 0, queue_tx.clone());
                     break;
                 }
             };
 
             let new_stream_required = false; // TODO: Implement this
             if new_stream_required {
-                let new_stream = self.new_stream();
+                let new_stream = connection.new_stream();
                 let new_stream_id = new_stream.id;
-                let mut active_streams = self.active_streams.lock().unwrap();
+                let mut active_streams = connection.active_streams.lock().unwrap();
                 active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
             }
 
-            let resp_frame: Result<Option<Frame>, ErrorCode> = match frame.payload {
+            let resp_frame: Result<Option<Frame>, ErrorCode> = match frame.payload.clone() {
                 // See section 6.5
                 FrameBody::Settings(settings) => {
                     let flags = SettingsFlags::from_bits_retain(frame.header.flags);
@@ -285,7 +286,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                             }
                         } else {
                             // Update self.settings
-                            self.peer_settings.lock().unwrap().update_with_vec(&settings);
+                            connection.peer_settings.lock().unwrap().update_with_vec(&settings);
 
                             // Send ACK
                             let flag = SettingsFlags::ACK;
@@ -309,14 +310,14 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                     queue_tx.push(resp_frame);
                 }
                 Err(error_code) => {
-                    self.close_with_error(error_code, frame.header.stream_id, queue_tx);
+                    connection.close_with_error(error_code, frame.header.stream_id, queue_tx);
                     break;
                 }
                 _ => {}
             }
 
             {
-                let active_streams = self.active_streams.lock().unwrap();
+                let active_streams = connection.active_streams.lock().unwrap();
                 let mut stream = active_streams
                     .get(&frame.header.stream_id)
                     .unwrap()
@@ -325,7 +326,8 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
                 match stream.recv(frame.clone()) {
                     Ok(Some(req)) => {
                         let tx = queue_tx.clone();
-                        thread::spawn(move || self.handle_request(req, frame.header.stream_id , tx));
+                        let connection_cp = connection.clone();
+                        thread::spawn(move || connection_cp.handle_request(req, frame.header.stream_id, tx));
                     }
                     Err(err) => {
                         // Close connection if connection error
@@ -338,7 +340,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
         }
     }
 
-    fn run_tx(&self, queue_rx: ResponseQueueRx, tcp_stream: TcpStream) {
+    fn run_tx(connection: Arc<Self>, queue_rx: ResponseQueueRx, tcp_stream: TcpStream) {
         loop {
             let frame = match queue_rx.pop() {
                 Ok(tagged_resp) => tagged_resp,
@@ -348,7 +350,7 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
             };
             let frame_id = frame.header.stream_id;
             if let Ok(tcp_stream_cp) = tcp_stream.try_clone() {
-                self.send_frame(frame, frame_id, tcp_stream_cp);
+                let _ = connection.send_frame(frame, frame_id, tcp_stream_cp);
             }
         }
     }
@@ -371,18 +373,19 @@ impl<T: ReqHandlerFn + Sync> Connection<T> {
         queue_tx.push(frame);
     }
 
-    pub fn run(&self, tcp_stream: TcpStream) -> Option<()> {
+    pub fn run(self, tcp_stream: TcpStream) -> Option<()> {
         let tcp_stream_cp = tcp_stream.try_clone().ok()?;
         let (tx, rx) = mpsc::channel();
         let queue_tx = ResponseQueueTx::new(tx);
         let queue_rx = ResponseQueueRx::new(rx);
-        let rx_handle = thread::spawn(move || {
-            
-            self.run_rx(queue_tx, tcp_stream_cp)
-        });
-        let tx_handle = thread::spawn(move || self.run_tx(queue_rx, tcp_stream));
-        rx_handle.join();
-        tx_handle.join();
+
+        let connection = Arc::new(self);
+        let connection_cp = connection.clone();
+
+        let rx_handle = thread::spawn(move || Self::run_rx(connection, queue_tx, tcp_stream_cp));
+        let tx_handle = thread::spawn(move || Self::run_tx(connection_cp, queue_rx, tcp_stream));
+        rx_handle.join().unwrap();
+        tx_handle.join().unwrap();
         None
     }
 }
@@ -421,11 +424,11 @@ impl SettingsIdentifier {
             ),
         ];
         match VALID_RANGES.iter().find(|entry| entry.0 == *self) {
-            Some((identifier, min, max, errorCode)) => {
+            Some((_identifier, min, max, error_code)) => {
                 if min <= &value && &value <= max {
                     Ok(value)
                 } else {
-                    Err(errorCode.clone())
+                    Err(error_code.clone())
                 }
             }
             None => Ok(value),
@@ -439,12 +442,12 @@ impl SettingsMap {
         let mut settings_map = Self(HashMap::new());
 
         // Theses fields should ALWAYS exist within the lifespan of a SettingsMap
-        settings_map.set(SettingsIdentifier::HeaderTableSize, 4096);
-        settings_map.set(SettingsIdentifier::EnablePush, 1);
-        settings_map.set(SettingsIdentifier::MaxConcurrentStreams, 128);
-        settings_map.set(SettingsIdentifier::InitialWindowSize, 65535);
-        settings_map.set(SettingsIdentifier::MaxFrameSize, 16384);
-        settings_map.set(SettingsIdentifier::MaxHeaderListSize, u32::MAX);
+        settings_map.set(SettingsIdentifier::HeaderTableSize, 4096).unwrap();
+        settings_map.set(SettingsIdentifier::EnablePush, 1).unwrap();
+        settings_map.set(SettingsIdentifier::MaxConcurrentStreams, 128).unwrap();
+        settings_map.set(SettingsIdentifier::InitialWindowSize, 65535).unwrap();
+        settings_map.set(SettingsIdentifier::MaxFrameSize, 16384).unwrap();
+        settings_map.set(SettingsIdentifier::MaxHeaderListSize, u32::MAX).unwrap();
 
         settings_map
     }

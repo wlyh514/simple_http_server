@@ -107,7 +107,7 @@ fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerS
 }
 
 fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
-    let (status, file_name) = match (req.method.as_str(), req.path.as_str()) {
+    let (_status, file_name) = match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/") => (ResponseStatus::Ok, "index.html"),
         (_, "/slow") => {
             // Simulate long processing time
@@ -121,7 +121,7 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
     let content_length = contents.len();
     let mut response = http::HTTPResponse::default();
 
-    response.headers.insert("content-length".into(), HeaderVal::Single("{content_length}".into()));
+    response.headers.insert("content-length".into(), HeaderVal::Single(format!("{content_length}").into()));
     response.body = Some(contents.into());
 
     response

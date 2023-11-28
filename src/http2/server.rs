@@ -8,11 +8,11 @@ use crate::http::ReqHandlerFn;
 use super::{connection::{Connection, SettingsMap}, frames::{Frame, FrameBody}};
 
 
-pub struct Server<T: ReqHandlerFn + Sync + Send + Copy + 'static> {
+pub struct Server<T: ReqHandlerFn + Copy + 'static> {
     handler: T,
 }
 
-impl<T: ReqHandlerFn + Sync + Send + Copy> Server<T> {
+impl<T: ReqHandlerFn + Copy> Server<T> {
     pub fn new(handler: T) -> Self {
         Self { handler }
     }
@@ -25,7 +25,7 @@ impl<T: ReqHandlerFn + Sync + Send + Copy> Server<T> {
         let read_stream = stream.try_clone().ok()?;
         let mut reader = BufReader::new(read_stream);
         let mut preface_starter = [0; 24];
-        reader.read_exact(&mut preface_starter);
+        reader.read_exact(&mut preface_starter).ok()?;
         let preface_starter = String::from_utf8(preface_starter.into()).ok()?;
         if preface_starter != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
             return None
@@ -49,10 +49,10 @@ impl<T: ReqHandlerFn + Sync + Send + Copy> Server<T> {
         // Send a preface
         let server_preface_frame = Frame::new(0, 0, FrameBody::Settings(SettingsMap::default().into()));
         let server_preface_bytes: Bytes = server_preface_frame.try_into().ok()?;
-        stream.write_all(&server_preface_bytes);
+        stream.write_all(&server_preface_bytes).ok()?;
 
         // Create connection struct
-        let connection = Connection::new(self.handler.clone(), settings);
+        let connection: Connection<T> = Connection::new(self.handler, settings);
         thread::spawn(move || connection.run(stream) /* Maybe kill connection afterwards? */);
         None
     }
@@ -62,11 +62,11 @@ mod test {
     use crate::http::{HTTPRequest, HTTPResponse};
     use super::Server;
 
-    fn sample_handler(_: HTTPRequest) -> HTTPResponse {
+    fn _sample_handler(_: HTTPRequest) -> HTTPResponse {
         HTTPResponse::default()
     }
 
-    fn test_traits() {
-        let _server = Server::new(sample_handler);
+    fn _test_traits() {
+        let _server = Server::new(_sample_handler);
     }
 }

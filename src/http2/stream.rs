@@ -326,14 +326,9 @@ fn hdr_field_try_get_single_val(hdr_map: &HeadersMap, field_name: &str) -> Resul
 /// See https://httpwg.org/specs/rfc7541.html.
 pub fn compress_header(hdrs: &HeadersMap) -> Bytes {
     let mut encoder: Encoder<'_> = Encoder::new();
-
-    let headers: Vec<(&[u8], &[u8])> = hdrs
-        .into_iter()
-        .map(|(key, value)| {
-            (key.as_bytes(), value.as_bytes().clone().as_ref())
-        })
-        .collect();
-    Bytes::from(encoder.encode(headers))
+    let header_vec: Vec<(Vec<u8>, Vec<u8>)> = hdrs.into_iter().map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec())).collect();
+    return Bytes::from(encoder.encode(header_vec.iter().map(|h| (&h.0[..], &h.1[..]))));
+    // Bytes::from(encoder.encode(hdrs.iter().map(|(k, v)| (k.as_bytes(), v.as_bytes()))))
 }
 
 /// Decompress headers using HPACK.
