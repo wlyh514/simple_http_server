@@ -3,7 +3,7 @@ use ::std::{net::TcpStream, thread};
 
 use bytes::Bytes;
 
-use crate::http::ReqHandlerFn;
+use crate::{http::ReqHandlerFn, http2::{frames::SettingsFlags, connection::SettingsIdentifier}};
 
 use super::{connection::{Connection, SettingsMap}, frames::{Frame, FrameBody}};
 
@@ -21,7 +21,7 @@ impl<T: ReqHandlerFn + Copy> Server<T> {
         // section 3.4: Starting HTTP/2 with prior knowledge
         // TRY TODO: Support other starting methods
 
-        // Receive a preface
+        // Receive client preface
         let read_stream = stream.try_clone().ok()?;
         let mut reader = BufReader::new(read_stream);
         let mut preface_starter = [0; 24];
@@ -33,8 +33,12 @@ impl<T: ReqHandlerFn + Copy> Server<T> {
 
         let settings = match Frame::try_read_from_buf(reader) {
             Ok(frame) => {
-                if frame.validate().is_err() {
-                    return None
+                match frame.is_valid() {
+                    Err(err) => {
+                        println!("{err}");
+                        return None
+                    },
+                    _ => {}
                 }
                 match frame.payload {
                     FrameBody::Settings(settings) => settings,
@@ -46,14 +50,23 @@ impl<T: ReqHandlerFn + Copy> Server<T> {
             }
         };
 
-        // Send a preface
-        let server_preface_frame = Frame::new(0, 0, FrameBody::Settings(SettingsMap::default().into()));
+        let mut server_settings = SettingsMap::default();
+        server_settings.set(SettingsIdentifier::EnablePush, 0).ok()?;
+
+        // Send server preface
+        let server_preface_frame = Frame::new(0, 0, FrameBody::Settings(server_settings.into()));
         let server_preface_bytes: Bytes = server_preface_frame.try_into().ok()?;
         stream.write_all(&server_preface_bytes).ok()?;
 
+        // Send ack
+        let ack_frame = Frame::new(0, SettingsFlags::ACK.bits(), FrameBody::Settings(vec![]));
+        let ack_frame_bytes: Bytes = ack_frame.try_into().ok()?;
+        stream.write_all(&ack_frame_bytes).ok()?;
+
         // Create connection struct
         let connection: Connection<T> = Connection::new(self.handler, settings);
-        thread::spawn(move || connection.run(stream) /* Maybe kill connection afterwards? */);
+        println!("Connection Established");
+        thread::spawn(move || connection.run(stream));
         None
     }
 }

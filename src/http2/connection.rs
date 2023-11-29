@@ -315,7 +315,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 }
                 _ => {}
             }
-
+            // FIX: Add a stream with id=0 into the initial map, or treat it specially. 
             {
                 let active_streams = connection.active_streams.lock().unwrap();
                 let mut stream = active_streams
@@ -386,6 +386,8 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         let tx_handle = thread::spawn(move || Self::run_tx(connection_cp, queue_rx, tcp_stream));
         rx_handle.join().unwrap();
         tx_handle.join().unwrap();
+
+        println!("Connection Ended");
         None
     }
 }

@@ -40,7 +40,7 @@ bitflags! {
 
 const FRAME_HDR_SIZE: usize = 24 + 8 + 8 + 32;
 /// See RFC7540 section 4
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FrameHeader {
     pub length: usize,
     frame_type: u8,
@@ -48,7 +48,7 @@ pub struct FrameHeader {
     pub stream_id: u32,
 }
 impl FrameHeader {
-    fn put_buf(self, buf: &mut BytesMut) {
+    fn put_buf(&self, buf: &mut BytesMut) {
         // Write length as u24 in big endian
         buf.put_u8(((self.length >> 16) & 0xff) as u8);
         buf.put_u8(((self.length >> 8) & 0xff) as u8);
@@ -79,14 +79,14 @@ impl TryFrom<Bytes> for FrameHeader {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct SettingParam {
     pub identifier: SettingsIdentifier, 
     pub value: u32
 }
 
 /// See RFC7540 section 6
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum FrameBody {
     Data {
         pad_length: usize,
@@ -148,31 +148,31 @@ impl FrameBody {
     fn size(&self) -> usize {
         match self {
             Self::Data { pad_length, data } => {
-                8 + data.len() + pad_length
+                1 + data.len() + pad_length
             },
             Self::Headers { pad_length, hdr_block_frag, ..} => {
-                8 + 32 + 8 + hdr_block_frag.len() + pad_length
+                1 + 4 + 1 + hdr_block_frag.len() + pad_length
             },
             Self::Priority { .. } => {
-                32 + 8
+                4 + 1
             },
             Self::RstStream { .. } => {
-                32
+                4
             },
-            Self::Settings { .. } => {
-                16 + 32
+            Self::Settings (settings) => {
+                settings.len() * 6
             },
             Self::PushPromise { pad_length, hdr_block_frag, .. } => {
-                8 + 32 + hdr_block_frag.len() + pad_length
+                1 + 4 + hdr_block_frag.len() + pad_length
             },
             Self::Ping { .. } => {
-                64
+                8
             },
             Self::GoAway { additional_debug_data, .. } => {
-                32 + 32 + additional_debug_data.len()
+                4 + 4 + additional_debug_data.len()
             },
             Self::WindowUpdate { .. } => {
-                32
+                4
             },
             Self::Continuation { hdr_block_frag } => {
                 hdr_block_frag.len()
@@ -181,12 +181,13 @@ impl FrameBody {
     }
 
     /// Serialization
-    fn try_put_buf(self, buf: &mut BytesMut) -> Result<(), &'static str> {
+    fn try_put_buf(&self, buf: &mut BytesMut) -> Result<(), &'static str> {
         match self {
             Self::Data { pad_length, data } => {
-                buf.put_u8(pad_length.try_into().unwrap());
-                buf.put(data);
-                buf.put_bytes(0, pad_length);
+                let pad_length_u8: u8 = (*pad_length).try_into().unwrap();
+                buf.put_u8(pad_length_u8);
+                buf.put((*data).clone());
+                buf.put_bytes(0, *pad_length);
                 Ok(())
             }
             Self::Headers {
@@ -196,16 +197,16 @@ impl FrameBody {
                 weight,
                 hdr_block_frag,
             } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
-                buf.put_u8(pad_length.try_into().unwrap());
-                buf.put_u32(if e {
+                let hdr_block_frag_bytes: Bytes = (*hdr_block_frag).clone().try_into().map_err(|_| "Error compressing header")?;
+                buf.put_u8((*pad_length).try_into().unwrap());
+                buf.put_u32(if *e {
                     stream_dep | 0x8000_0000
                 } else {
-                    stream_dep
+                    *stream_dep
                 });
-                buf.put_u8(weight);
+                buf.put_u8(*weight);
                 buf.put(hdr_block_frag_bytes);
-                buf.put_bytes(0, pad_length);
+                buf.put_bytes(0, *pad_length);
                 Ok(())
             }
             Self::Priority {
@@ -213,21 +214,21 @@ impl FrameBody {
                 stream_dep: stream_pri,
                 weight,
             } => {
-                buf.put_u32(if e {
+                buf.put_u32(if *e {
                     stream_pri | 0x8000_0000
                 } else {
-                    stream_pri
+                    *stream_pri
                 });
-                buf.put_u8(weight.try_into().unwrap());
+                buf.put_u8((*weight).try_into().unwrap());
                 Ok(())
             }
             Self::RstStream { error_code } => {
-                buf.put_u32(error_code as u32);
+                buf.put_u32(((*error_code).clone()) as u32);
                 Ok(())
             }
             Self::Settings (params) => {
                 for param in params {
-                    buf.put_u16(param.identifier as u16);
+                    buf.put_u16(param.identifier.clone() as u16);
                     buf.put_u32(param.value);
                 }
                 Ok(())
@@ -237,15 +238,15 @@ impl FrameBody {
                 promised_stream_id,
                 hdr_block_frag,
             } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
-                buf.put_u8(pad_length.try_into().unwrap());
+                let hdr_block_frag_bytes: Bytes = (*hdr_block_frag).clone().try_into().map_err(|_| "Error compressing header")?;
+                buf.put_u8((*pad_length).try_into().unwrap());
                 buf.put_u32(promised_stream_id & 0x7fff_ffff);
                 buf.put(hdr_block_frag_bytes);
-                buf.put_bytes(0, pad_length);
+                buf.put_bytes(0, *pad_length);
                 Ok(())
             }
             Self::Ping { data, .. } => {
-                buf.put(data);
+                buf.put((*data).clone());
                 Ok(())
             }
             Self::GoAway {
@@ -254,8 +255,8 @@ impl FrameBody {
                 additional_debug_data,
             } => {
                 buf.put_u32(last_stream_id & 0x7fff_ffff);
-                buf.put_u32(error_code as u32);
-                buf.put(additional_debug_data);
+                buf.put_u32((*error_code).clone() as u32);
+                buf.put((*additional_debug_data).clone());
                 Ok(())
             }
             Self::WindowUpdate {
@@ -265,7 +266,7 @@ impl FrameBody {
                 Ok(())
             }
             Self::Continuation { hdr_block_frag } => {
-                let hdr_block_frag_bytes: Bytes = hdr_block_frag.try_into().map_err(|_| "Error compressing header")?;
+                let hdr_block_frag_bytes: Bytes = (*hdr_block_frag).clone().try_into().map_err(|_| "Error compressing header")?;
                 buf.put(hdr_block_frag_bytes);
                 Ok(())
             }
@@ -277,7 +278,7 @@ impl FrameBody {
         match hdr.frame_type {
             0x0 => {
                 let pad_length: usize = buf.get_u8().into();
-                let data_length = hdr.length - 8 - pad_length;
+                let data_length = hdr.length - 1 - pad_length;
                 let data = buf.slice(..data_length);
                 Ok(Self::Data { pad_length, data })
             }, 
@@ -290,7 +291,7 @@ impl FrameBody {
 
                 let weight = buf.get_u8();
 
-                let hdr_block_frag_len = hdr.length - 8 - 32 - 8 - pad_length;
+                let hdr_block_frag_len = hdr.length - 1 - 4 - 1 - pad_length;
                 let hdr_block_frag = buf.slice(..hdr_block_frag_len);
                 Ok(Self::Headers { pad_length, e, stream_dep, weight, hdr_block_frag })
             }, 
@@ -312,14 +313,14 @@ impl FrameBody {
             0x4 => {
                 let mut remaining_size: usize = hdr.length;
                 let mut setting_params: Vec<SettingParam> = vec![];
-                while remaining_size >= 48 {
+                while remaining_size >= 6 {
                     let identifier = buf.get_u16();
                     let identifier: SettingsIdentifier = identifier.try_into()
                         .map_err(|_| error::BodySerializationError::UnknownSettingsIdentifier(identifier))?;
                     let value = buf.get_u32();
 
                     setting_params.push(SettingParam { identifier, value });
-                    remaining_size -= 48;
+                    remaining_size -= 6;
                 }
 
                 Ok(Self::Settings (setting_params))
@@ -327,7 +328,7 @@ impl FrameBody {
             0x5 => {
                 let pad_length: usize = buf.get_u8().into(); 
                 let promised_stream_id = buf.get_u32() & 0x7fff_ffff;
-                let hdr_block_frag = buf.slice(..(hdr.length - 8 - 32 - pad_length));
+                let hdr_block_frag = buf.slice(..(hdr.length - 1 - 4 - pad_length));
                 Ok(Self::PushPromise { pad_length, promised_stream_id, hdr_block_frag})
             },
             0x6 => {
@@ -339,7 +340,7 @@ impl FrameBody {
                 let error_code = buf.get_u32();
                 let error_code: ErrorCode = error_code.try_into()
                     .map_err(|_| error::BodySerializationError::UnknownErrorCode(error_code))?;
-                let additional_debug_data = buf.slice(..(hdr.length - 32 - 32));
+                let additional_debug_data = buf.slice(..(hdr.length - 4 - 4));
                 Ok(Self::GoAway { last_stream_id, error_code, additional_debug_data })
             },
             0x8 => {
@@ -375,34 +376,37 @@ impl Frame {
     }
 
     /// A frame must be verified before serialized and sent. 
-    pub fn validate(&self) -> Result<(), &'static str> {
+    pub fn is_valid(&self) -> Result<(), &'static str> {
         let payload_len = self.payload.size();
         if payload_len != self.header.length {
             return Err("Incorrect FrameHeader.length")
         }
 
         // TODO: Check for unsupported header
-
-        // TODO: Get a better name for this fn
         Ok(())
     }
 
     /// Deserialization
     pub fn try_read_from_buf(mut buf_reader: BufReader<TcpStream>) -> Result<Frame, error::SerializationError> {
-        let mut header_buf = BytesMut::with_capacity(9);
+        let mut header_buf = BytesMut::zeroed(9);
         // Read frame header
-        buf_reader.read_exact(&mut header_buf).map_err(|_| error::SerializationError::BufReaderError)?;
-        let header_buf: Bytes = header_buf.into();
-        println!("{:#?}", header_buf); //TODO: FIX this, this is empty
+        buf_reader.read_exact(header_buf.as_mut()).map_err(|_| error::SerializationError::BufReaderError)?;
+        println!("{}", header_buf.len());
+        let header_buf: Bytes = Bytes::copy_from_slice(&header_buf);
+        
         let header = FrameHeader::try_from(header_buf)
             .map_err(|err| error::SerializationError::Header(err))?;
 
-        let mut payload_buf = BytesMut::with_capacity(header.length);
-        buf_reader.read_exact(&mut payload_buf).map_err(|_| error::SerializationError::BufReaderError)?;
+        let mut payload_buf: Vec<u8> = vec![0; header.length];
+        buf_reader.read_exact(payload_buf.as_mut_slice()).map_err(|_| error::SerializationError::BufReaderError)?;
         let payload_buf: Bytes = payload_buf.into();
+        println!("{}", payload_buf.len());
         
         let payload = FrameBody::try_from_buf(payload_buf, &header)
             .map_err(|err| error::SerializationError::Body(err))?;
+
+        println!("Received Frame: \n<<<\nHeader: {:#?};\nPayload: {:#?}\n>>>", header, payload);
+
         Ok(Self { header, payload })
     }
 }
@@ -414,6 +418,7 @@ impl TryInto<Bytes> for Frame {
         let mut buf = BytesMut::with_capacity(FRAME_HDR_SIZE + self.header.length);
         self.header.put_buf(&mut buf);
         self.payload.try_put_buf(&mut buf)?;
+        println!("Sent Frame: \n<<<\nHeader: {:#?}\nPayload: {:#?}\n>>>", self.header, self.payload);
         Ok(buf.into())
     }
 }
