@@ -51,6 +51,7 @@ pub type HeadersMap = HashMap<String, HeaderVal>;
 pub trait ReqHandlerFn: Fn(HTTPRequest) -> HTTPResponse + Sync + Send {}
 impl<F: Fn(HTTPRequest) -> HTTPResponse + Sync + Send> ReqHandlerFn for F {}
 
+#[derive(Debug)]
 pub struct HTTPRequest {
     pub method: String,
     pub path: String,
