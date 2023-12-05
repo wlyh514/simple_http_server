@@ -60,6 +60,7 @@ impl<T: ReqHandlerFn + Copy> Server<T> {
         let server_preface_frame = Frame::new(0, 0, FrameBody::Settings(server_settings.into()));
         let server_preface_bytes: Bytes = server_preface_frame.try_into().ok()?;
         tcp_writer.write_all(server_preface_bytes.as_ref()).ok()?;
+        tcp_writer.flush().unwrap();
 
         // Send ack
         let ack_frame = Frame::new(0, SettingsFlags::ACK.bits(), FrameBody::Settings(vec![]));

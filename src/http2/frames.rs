@@ -153,10 +153,10 @@ impl FrameBody {
     fn size(&self) -> usize {
         match self {
             Self::Data { pad_length, data } => {
-                1 + data.len() + pad_length.unwrap_or(0)
+                data.len() + pad_length.map_or(0, |n| n + 1)
             },
-            Self::Headers { pad_length, hdr_block_frag, ..} => {
-                1 + 4 + 1 + hdr_block_frag.len() + pad_length.unwrap_or(0)
+            Self::Headers { pad_length, hdr_block_frag, priority } => {
+                pad_length.map_or(0, |n| n + 1) + hdr_block_frag.len() + priority.as_ref().map_or(0, |_| 5)
             },
             Self::Priority { .. } => {
                 4 + 1
@@ -168,7 +168,7 @@ impl FrameBody {
                 settings.len() * 6
             },
             Self::PushPromise { pad_length, hdr_block_frag, .. } => {
-                1 + 4 + hdr_block_frag.len() + pad_length.unwrap_or(0)
+                pad_length.map_or(0, |n| n + 1) + 4 + hdr_block_frag.len()
             },
             Self::Ping { .. } => {
                 8
