@@ -3,7 +3,7 @@ use bytes::Bytes;
 
 use crate::{
     http::{hdr_map_size, HTTPRequest, HTTPResponse, HeaderVal, ReqHandlerFn},
-    http2::stream::StreamState,
+    http2::{stream::{StreamState, ReqAssemblerState}, frames::{self, PingFlags}},
 };
 
 use super::{
@@ -232,9 +232,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     }
 
     fn handle_request(&self, req: HTTPRequest, stream_id: u32, queue_tx: ResponseQueueTx) {
-        dbg!(&req);
         let resp = (self.handler)(req);
-        dbg!(&resp);
         match self.make_frames(stream_id, resp) {
             Ok(frames) => {
                 for frame in frames {
@@ -251,8 +249,14 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
             let frame  = match Frame::try_read_from_buf(&mut tcp_reader) {
                 Ok(frame) => frame,
                 Err(err) => {
-                    println!("Closing connection because of error {:#?}", err);
-                    connection.close_with_error(ErrorCode::ProtocolError, 0, queue_tx.clone());
+                    match err {
+                        frames::error::DeserializationError::BufReaderError => {},
+                        _ => {
+                            println!("Closing connection because of error {:#?}", err);
+                            connection.close_with_error(ErrorCode::ProtocolError, 0, queue_tx.clone());
+                        }
+                    };
+                    
                     break;
                 }
             };
@@ -264,6 +268,25 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 let mut active_streams = connection.active_streams.lock().unwrap();
                 active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
             }
+
+            // Section 8.1: Other frames (from any stream) MUST NOT occur between the HEADERS frame and any CONTINUATION frames that might follow
+            {
+                let active_streams = connection.active_streams.lock().unwrap();
+                for stream_id in active_streams.keys() {
+                    let stream = active_streams.get(stream_id).unwrap().lock().unwrap();
+                    if *stream.get_req_assembler_state() == ReqAssemblerState::ReadingHeader {
+                        match frame.payload {
+                            FrameBody::Continuation { .. } => {},
+                            _ => {
+                                println!("stream {} received frame {:#?} while a Continuation is expected. ", stream_id, frame.header);
+                                connection.close_with_error(ErrorCode::ProtocolError, frame.header.stream_id, queue_tx);
+                                return; 
+                            }
+                        }
+                    }
+                }
+            }
+            
 
             let resp_frame: Result<Option<Frame>, ErrorCode> = match frame.payload.clone() {
                 // See section 6.5
@@ -291,6 +314,35 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                                 flag.bits(),
                                 FrameBody::Settings(vec![]),
                             )))
+                        }
+                    }
+                },
+                // See section 6.7
+                FrameBody::Ping { data } => {
+                    if frame.header.flags == PingFlags::ACK.bits() {
+                        Ok(None)
+                    } else {
+                        Ok(Some(Frame::new(frame.header.stream_id, PingFlags::ACK.bits(), FrameBody::Ping { data })))
+                    }
+                },
+                // See section 6.4
+                FrameBody::RstStream { .. } => {
+                    if frame.header.length != 4 {
+                        Err(ErrorCode::FrameSizeError)
+                    } else {
+                        let active_streams = connection.active_streams.lock().unwrap();
+                        let stream = active_streams.get(&frame.header.stream_id);
+                        match stream {
+                            Some(stream) => {
+                                let stream = stream.lock().unwrap();
+                                if stream.state == StreamState::Idle {
+                                    Err(ErrorCode::ProtocolError)
+                                } else {
+                                    // Kill the stream
+                                    Ok(None)
+                                }
+                            }, 
+                            None => Err(ErrorCode::ProtocolError)
                         }
                     }
                 }
@@ -327,12 +379,13 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     }
                     Err(err) => {
                         // Close connection if connection error
-                        println!("Connection closed with error code {:#?}", err);
+                        connection.close_with_error(err, frame.header.stream_id, queue_tx);
                         break;
                     }
                     _ => {}
                 };
                 if stream.state == StreamState::Closed {
+                    println!("Stream {} closed. ", stream.id);
                     connection.active_streams.lock().unwrap().remove(&stream.id);
                 }
                 req
@@ -364,6 +417,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         last_stream_id: u32,
         queue_tx: ResponseQueueTx,
     ) {
+        println!("Closing the connection with error {:#?}", error_code);
         let frame: Frame = Frame::new(
             0,
             0,

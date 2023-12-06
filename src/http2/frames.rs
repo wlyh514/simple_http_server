@@ -498,7 +498,7 @@ pub enum ErrorCode {
     HTTP1_1Required = 0xd,
 }
 
-mod error {
+pub mod error {
     #[derive(Debug)]
     pub enum HeaderDeserializationError {
         BufferTooSmall, 

@@ -7,11 +7,161 @@ use super::frames::{ContinuationFlags, DataFlags, ErrorCode, Frame, FrameBody, H
 use hpack::Decoder;
 use hpack::Encoder;
 
+/// See RFC 7540 section 8.1
+#[derive(PartialEq, Debug)]
+pub enum ReqAssemblerState {
+    Init,
+    ReadingHeader,
+    ReadingBody,
+    ReadingTrailer,
+    Done,
+}
+
+struct ReqAssembler {
+    hdr_block: BytesMut,
+    body: BytesMut, 
+    trailer_block: BytesMut,
+    state: ReqAssemblerState,
+}
+impl ReqAssembler {
+    pub fn new() -> Self {
+        Self {
+            hdr_block: BytesMut::new(),
+            body: BytesMut::new(), 
+            trailer_block: BytesMut::new(),
+            state: ReqAssemblerState::Init,
+        }
+    }
+
+    pub fn recv_frame(&mut self, frame: Frame) {
+        let new_state: Option<ReqAssemblerState> = match self.state {
+            ReqAssemblerState::Init => match &frame.payload {
+                FrameBody::Headers { hdr_block_frag, .. } => {
+                    self.hdr_block.extend_from_slice(&hdr_block_frag);
+
+                    let frame_flags: HeadersFlags =
+                        HeadersFlags::from_bits_retain(frame.header.flags);
+
+                    if frame_flags.contains(HeadersFlags::END_STREAM) {
+                        Some(ReqAssemblerState::Done)
+                    } else if frame_flags.contains(HeadersFlags::END_HEADERS) {
+                        Some(ReqAssemblerState::ReadingBody)
+                    } else {
+                        Some(ReqAssemblerState::ReadingHeader)
+                    }
+                }
+                _ => None,
+            },
+
+            ReqAssemblerState::ReadingHeader => match &frame.payload {
+                FrameBody::Continuation { hdr_block_frag } => {
+                    self.hdr_block.extend_from_slice(&hdr_block_frag);
+
+                    let frame_flags: ContinuationFlags =
+                        ContinuationFlags::from_bits_retain(frame.header.flags);
+
+                    if frame_flags.contains(ContinuationFlags::END_HEADERS) {
+                        Some(ReqAssemblerState::ReadingBody)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+
+            ReqAssemblerState::ReadingBody => match &frame.payload {
+                FrameBody::Data { data, .. } => {
+                    self.body.extend_from_slice(&data);
+
+                    let frame_flags: DataFlags =
+                        DataFlags::from_bits_retain(frame.header.flags);
+
+                    if frame_flags.contains(DataFlags::END_STREAM) {
+                        Some(ReqAssemblerState::Done)
+                    } else {
+                        None
+                    }
+                }
+                FrameBody::Headers { hdr_block_frag, .. } => {
+                    self.trailer_block.extend_from_slice(&hdr_block_frag);
+
+                    let frame_flags: HeadersFlags =
+                        HeadersFlags::from_bits_retain(frame.header.flags);
+
+                    if frame_flags.contains(HeadersFlags::END_STREAM) {
+                        Some(ReqAssemblerState::Done)
+                    } else {
+                        Some(ReqAssemblerState::ReadingTrailer)
+                    }
+                }
+                _ => None,
+            },
+
+            ReqAssemblerState::ReadingTrailer => match &frame.payload {
+                FrameBody::Continuation { hdr_block_frag } => {
+                    self.trailer_block.extend_from_slice(&hdr_block_frag);
+                    let frame_flags: ContinuationFlags =
+                        ContinuationFlags::from_bits_retain(frame.header.flags);
+
+                    if frame_flags.contains(ContinuationFlags::END_HEADERS) {
+                        Some(ReqAssemblerState::Done)
+                    } else {
+                        None 
+                    }
+                }
+                _ => None,
+            },
+
+            ReqAssemblerState::Done => None,
+        };
+        if let Some(new_state) = new_state {
+            self.state = new_state
+        };
+    }
+
+    pub fn assemble(&mut self) -> Result<HTTPRequest, ErrorCode>{
+        match self.state {
+            ReqAssemblerState::Done => {
+                let headers =
+                    decompress_header(&self.hdr_block).map_err(|_| ErrorCode::CompressionError)?;
+
+                let body: Option<Bytes> = match self.body.len() {
+                    0 => None,
+                    _ => Some(self.body.clone().into()),
+                };
+                let trailers: Option<HeadersMap> = match self.trailer_block.len() {
+                    0 => None,
+                    _ => Some(
+                        decompress_header(&self.trailer_block)
+                            .map_err(|_| ErrorCode::CompressionError)?,
+                    ),
+                };
+
+                // Validate request, see RFC7540 section 8.1.2.6
+                let method = hdr_field_try_get_single_val(&headers, ":method")?;
+                let _scheme = hdr_field_try_get_single_val(&headers, ":scheme")?;
+                let path = hdr_field_try_get_single_val(&headers, ":path")?;
+
+                let mut req = HTTPRequest::new(method.as_str(), path.as_str(), "HTTP/2");
+                req.headers = headers;
+                req.body = body;
+                req.trailers = trailers;
+                Ok(req)
+            }
+            _ => Err(ErrorCode::ProtocolError),
+        }
+    }
+
+    pub fn get_state(&self) -> &ReqAssemblerState {
+        &self.state
+    }
+}
+
 /// Maintains a state machine and a vector of received frames
 pub struct Stream {
     pub id: u32,
     pub state: StreamState,
-    received_frames: Vec<Frame>,
+    req_assembler: ReqAssembler,
 }
 #[derive(PartialEq, Clone, Copy)]
 pub enum StreamState {
@@ -23,145 +173,19 @@ pub enum StreamState {
     HalfClosedLocal,
     Closed,
 }
-/// See RFC 7540 section 8.1
-enum ReqAssemblerState {
-    Init,
-    ReadingHeader,
-    ReadingBody,
-    ReadingTrailer,
-    Done,
-}
+
 
 impl Stream {
     pub fn new(id: u32) -> Stream {
         Stream {
             id,
             state: StreamState::Idle,
-            received_frames: vec![],
+            req_assembler: ReqAssembler::new()
         }
     }
 
-    fn assemble_request(&self) -> Result<HTTPRequest, ErrorCode> {
-        let mut hdr_block = BytesMut::new();
-        let mut body = BytesMut::new();
-        let mut trailer_block = BytesMut::new();
-
-        let mut state = ReqAssemblerState::Init;
-        for frame in &self.received_frames {
-            state = match state {
-                ReqAssemblerState::Init => match &frame.payload {
-                    FrameBody::Headers { hdr_block_frag, .. } => {
-                        hdr_block.extend_from_slice(&hdr_block_frag);
-
-                        let frame_flags: HeadersFlags =
-                            HeadersFlags::from_bits_retain(frame.header.flags);
-
-                        if frame_flags.contains(HeadersFlags::END_STREAM) {
-                            ReqAssemblerState::Done
-                        } else if frame_flags.contains(HeadersFlags::END_HEADERS) {
-                            ReqAssemblerState::ReadingBody
-                        } else {
-                            ReqAssemblerState::ReadingHeader
-                        }
-                    }
-                    _ => state,
-                },
-
-                ReqAssemblerState::ReadingHeader => match &frame.payload {
-                    FrameBody::Continuation { hdr_block_frag } => {
-                        hdr_block.extend_from_slice(&hdr_block_frag);
-
-                        let frame_flags: ContinuationFlags =
-                            ContinuationFlags::from_bits_retain(frame.header.flags);
-
-                        if frame_flags.contains(ContinuationFlags::END_HEADERS) {
-                            ReqAssemblerState::ReadingBody
-                        } else {
-                            state
-                        }
-                    }
-                    _ => state,
-                },
-
-                ReqAssemblerState::ReadingBody => match &frame.payload {
-                    FrameBody::Data { data, .. } => {
-                        body.extend_from_slice(&data);
-
-                        let frame_flags: DataFlags =
-                            DataFlags::from_bits_retain(frame.header.flags);
-
-                        if frame_flags.contains(DataFlags::END_STREAM) {
-                            ReqAssemblerState::Done
-                        } else {
-                            state
-                        }
-                    }
-                    FrameBody::Headers { hdr_block_frag, .. } => {
-                        trailer_block.extend_from_slice(&hdr_block_frag);
-
-                        let frame_flags: HeadersFlags =
-                            HeadersFlags::from_bits_retain(frame.header.flags);
-
-                        if frame_flags.contains(HeadersFlags::END_STREAM) {
-                            ReqAssemblerState::Done
-                        } else {
-                            ReqAssemblerState::ReadingTrailer
-                        }
-                    }
-                    _ => state,
-                },
-
-                ReqAssemblerState::ReadingTrailer => match &frame.payload {
-                    FrameBody::Continuation { hdr_block_frag } => {
-                        trailer_block.extend_from_slice(&hdr_block_frag);
-
-                        let frame_flags: ContinuationFlags =
-                            ContinuationFlags::from_bits_retain(frame.header.flags);
-
-                        if frame_flags.contains(ContinuationFlags::END_HEADERS) {
-                            ReqAssemblerState::Done
-                        } else {
-                            state
-                        }
-                    }
-                    _ => state,
-                },
-
-                ReqAssemblerState::Done => break,
-            }
-        }
-        // Assemble a Request struct from bytes read
-        match state {
-            ReqAssemblerState::Done => {
-                let headers =
-                    decompress_header(hdr_block.into()).map_err(|_| ErrorCode::CompressionError)?;
-                let body: Option<Bytes> = match body.len() {
-                    0 => None,
-                    _ => Some(body.into()),
-                };
-                let trailers: Option<HeadersMap> = match trailer_block.len() {
-                    0 => None,
-                    _ => Some(
-                        decompress_header(trailer_block.into())
-                            .map_err(|_| ErrorCode::CompressionError)?,
-                    ),
-                };
-
-                // Validate request, see RFC7540 section 8.1.2.6
-                let method = hdr_field_try_get_single_val(&headers, ":method")?;
-                let _scheme = hdr_field_try_get_single_val(&headers, ":scheme")?;
-                let path = hdr_field_try_get_single_val(&headers, ":path")?;
-
-                
-
-                let mut req = HTTPRequest::new(method.as_str(), path.as_str(), "HTTP/2");
-                req.headers = headers;
-                req.body = body;
-                req.trailers = trailers;
-                Ok(req)
-            }
-            _ => Err(ErrorCode::ProtocolError),
-        }
+    pub fn get_req_assembler_state(&self) -> &ReqAssemblerState {
+        self.req_assembler.get_state()
     }
 
     pub fn recv(&mut self, frame: Frame) -> Result<Option<HTTPRequest>, ErrorCode> {
@@ -224,14 +248,13 @@ impl Stream {
 
             StreamState::Closed => self.state,
         };
-
-        self.received_frames.push(frame);
         self.state = next_state;
 
         // TRY TODO: Support handling request before body is fully received
 
+        self.req_assembler.recv_frame(frame);
         if end_of_stream {
-            self.assemble_request().map(|req| Some(req))
+            self.req_assembler.assemble().map(|req| Some(req))
         } else {
             Ok(None)
         }
@@ -326,16 +349,17 @@ fn hdr_field_try_get_single_val(hdr_map: &HeadersMap, field_name: &str) -> Resul
 /// See https://httpwg.org/specs/rfc7541.html.
 pub fn compress_header(hdrs: &HeadersMap) -> Bytes {
     let mut encoder: Encoder<'_> = Encoder::new();
-    let header_vec: Vec<(Vec<u8>, Vec<u8>)> = hdrs.into_iter().map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec())).collect();
+    let mut header_vec: Vec<(Vec<u8>, Vec<u8>)> = hdrs.into_iter().map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec())).collect();
+    header_vec.sort();
     return Bytes::from(encoder.encode(header_vec.iter().map(|h| (&h.0[..], &h.1[..]))));
     // Bytes::from(encoder.encode(hdrs.iter().map(|(k, v)| (k.as_bytes(), v.as_bytes()))))
 }
 
 /// Decompress headers using HPACK.
 /// See https://httpwg.org/specs/rfc7541.html.
-pub fn decompress_header(bytes: Bytes) -> Result<HeadersMap, ErrorCode> {
+pub fn decompress_header(bytes: &[u8]) -> Result<HeadersMap, ErrorCode> {
     let mut decoder: Decoder = Decoder::new();
-    match decoder.decode(&bytes) {
+    match decoder.decode(bytes) {
         Ok(header_list) => {
             let mut hdrs: HeadersMap = HeadersMap::new();
             for (key, value) in header_list {
@@ -382,7 +406,7 @@ mod tests {
 
         let compressed: Bytes = compress_header(&hdrs);
         let decompressed: Result<HashMap<String, HeaderVal>, ErrorCode> =
-            decompress_header(compressed);
+            decompress_header(&compressed);
 
         assert_eq!(decompressed.unwrap(), hdrs);
     }
