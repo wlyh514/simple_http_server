@@ -1,5 +1,5 @@
 use ::num_enum::{IntoPrimitive, TryFromPrimitive};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use crate::{
     http::{hdr_map_size, HTTPRequest, HTTPResponse, HeaderVal, ReqHandlerFn},
@@ -55,7 +55,7 @@ impl ResponseQueueTx {
 pub struct Connection<T: ReqHandlerFn + Copy> {
     peer_settings: Arc<Mutex<SettingsMap>>,
     /// max(id of every existed stream) + 1
-    stream_counter: Arc<AtomicU32>,
+    max_stream_id: Arc<AtomicU32>,
     active_streams: Arc<Mutex<HashMap<u32, Arc<Mutex<Stream>>>>>,
     handler: T,
     id: usize,
@@ -71,16 +71,16 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         peer_settings.update_with_vec(&peer_settings_params);
         Connection {
             peer_settings: Arc::new(Mutex::new(peer_settings)),
-            stream_counter: Arc::new(AtomicU32::new(1)),
+            max_stream_id: Arc::new(AtomicU32::new(0)),
             active_streams: Arc::new(Mutex::new(HashMap::new())),
             handler,
             id
         }
     }
 
-    fn new_stream(&self) -> Stream {
-        let new_id = self.stream_counter.fetch_add(1,Ordering::SeqCst);
-        let new_stream = Stream::new(new_id);
+    fn new_stream(&self, new_stream_id: u32) {
+        assert!(new_stream_id > self.max_stream_id.load(Ordering::SeqCst));
+        let new_stream = Stream::new(new_stream_id);
 
         {
             // Close all idle streams with id smaller than the new stream
@@ -95,10 +95,10 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
             for id in streams_to_close {
                 active_streams.remove(&id);
             }
+            active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
         }
 
-        self.stream_counter.store(new_id, Ordering::SeqCst);
-        new_stream
+        self.max_stream_id.store(new_stream_id, Ordering::SeqCst);
     }
 
     /// Convert a http response into frames to be sent.
@@ -217,13 +217,13 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
 
     /// Send a frame and update the frame's state machine accordingly.
     fn send_frame(&self, frame: Frame, tcp_writer: &mut BufWriter<TcpStream>) -> Result<(), ()> {
+        dbg!(self.id, "send", &frame);
+        
         let active_streams = self.active_streams.lock().unwrap();
-        let mut stream = active_streams
-            .get(&frame.header.stream_id)
-            .ok_or(())?
-            .lock()
-            .unwrap();
-        stream.send(&frame);
+        if let Some(stream) = active_streams.get(&frame.header.stream_id) {
+            stream.lock().unwrap().send(&frame);
+        }
+        
         let frame_bytes: Bytes = frame.try_into().map_err(|_| ())?;
         tcp_writer.write_all(frame_bytes.as_ref()).map_err(|_| ())?;
         tcp_writer.flush().map_err(|_| ())?;
@@ -260,13 +260,10 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     break;
                 }
             };
+            dbg!(connection.id, "recv", &frame);
 
-            let new_stream_required = frame.header.stream_id >= connection.stream_counter.load(Ordering::SeqCst); // TODO: Implement this
-            if new_stream_required {
-                let new_stream = connection.new_stream();
-                let new_stream_id = new_stream.id;
-                let mut active_streams = connection.active_streams.lock().unwrap();
-                active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
+            if frame.header.stream_id > connection.max_stream_id.load(Ordering::SeqCst) {
+                connection.new_stream(frame.header.stream_id);
             }
 
             // Section 8.1: Other frames (from any stream) MUST NOT occur between the HEADERS frame and any CONTINUATION frames that might follow
@@ -274,12 +271,13 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 let active_streams = connection.active_streams.lock().unwrap();
                 for stream_id in active_streams.keys() {
                     let stream = active_streams.get(stream_id).unwrap().lock().unwrap();
+                    dbg!(stream_id, stream.get_req_assembler_state());
                     if *stream.get_req_assembler_state() == ReqAssemblerState::ReadingHeader {
                         match frame.payload {
                             FrameBody::Continuation { .. } => {},
                             _ => {
                                 println!("stream {} received frame {:#?} while a Continuation is expected. ", stream_id, frame.header);
-                                connection.close_with_error(ErrorCode::ProtocolError, frame.header.stream_id, queue_tx);
+                                connection.close_with_error(ErrorCode::ProtocolError, frame.header.stream_id, queue_tx.clone());
                                 return; 
                             }
                         }
@@ -345,12 +343,16 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                             None => Err(ErrorCode::ProtocolError)
                         }
                     }
-                }
+                },
                 // Kill connection
                 FrameBody::GoAway { .. } => {
                     break;
                 }
-                _ => Ok(None),
+                _ => {
+                    // let empty_bytes: Bytes = BytesMut::zeroed(8).into();
+                    // Ok(Some(Frame::new(frame.header.stream_id, 0, FrameBody::Ping { data: empty_bytes })))
+                    Ok(None)
+                },
             };
 
             match resp_frame {
@@ -408,7 +410,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         }
 
         // Close stream 0
-        let _ = connection.send_frame(Frame::new(0, 0, FrameBody::RstStream { error_code: ErrorCode::NoError }), &mut tcp_writer);
+        // let _ = connection.send_frame(Frame::new(0, 0, FrameBody::RstStream { error_code: ErrorCode::NoError }), &mut tcp_writer);
     }
 
     fn close_with_error(
@@ -417,7 +419,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         last_stream_id: u32,
         queue_tx: ResponseQueueTx,
     ) {
-        println!("Closing the connection with error {:#?}", error_code);
+        println!("Closing connection {} with error {:#?}", self.id, error_code);
         let frame: Frame = Frame::new(
             0,
             0,

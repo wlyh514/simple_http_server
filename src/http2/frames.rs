@@ -414,7 +414,7 @@ impl FrameBody {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Frame {
     pub header: FrameHeader,
     pub payload: FrameBody,
@@ -461,8 +461,6 @@ impl Frame {
         let payload = FrameBody::try_from_buf(payload_buf, &header)
             .map_err(|err| error::DeserializationError::Body(err))?;
 
-        println!("Received Frame: \n<<<\nHeader: {:#?};\nPayload: {:#?}\n>>>", header, payload);
-
         Ok(Self { header, payload })
     }
 }
@@ -474,7 +472,6 @@ impl TryInto<Bytes> for Frame {
         let mut buf = BytesMut::with_capacity(FRAME_HDR_SIZE + self.header.length);
         self.header.put_buf(&mut buf);
         self.payload.try_put_buf(&mut buf)?;
-        println!("Sent Frame: \n<<<\nHeader: {:#?}\nPayload: {:#?}\n>>>", self.header, self.payload);
         Ok(buf.into())
     }
 }

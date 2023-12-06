@@ -121,18 +121,22 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
     let content_length = contents.len();
     let mut response = http::HTTPResponse::default();
 
+    response.headers.insert("access-control-allow-origin".into(), HeaderVal::Single("*".into()));
+    response.headers.insert("content-type".into(), HeaderVal::Single("text/html".into()));
     response.headers.insert("content-length".into(), HeaderVal::Single(format!("{content_length}").into()));
+    
     response.body = Some(contents.into());
 
     response
 }
 
 fn main() {
-    let listener = TcpListener::bind("localhost:7878").unwrap();
+    let host = "localhost:7878";
+    let listener = TcpListener::bind(host).unwrap();
 
     let h2_server = http2::server::Server::new(request_handler);
 
-    println!("Server started");
+    println!("Server started on {host}");
 
     for stream in listener.incoming() {
         let stream = stream.unwrap();
