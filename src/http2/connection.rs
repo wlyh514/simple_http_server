@@ -218,7 +218,11 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     /// Send a frame and update the frame's state machine accordingly.
     fn send_frame(&self, frame: Frame, tcp_writer: &mut BufWriter<TcpStream>) -> Result<(), ()> {
         dbg!(self.id, "send", &frame);
-        
+
+        // If the stream exists, update its state machine.
+        // Otherwise we skip this step, which would happen if:
+        // a) We are sending a GOAWAY frame
+        // b) We are sending a PRIORITY frame for a stream in CLOSED state.
         let active_streams = self.active_streams.lock().unwrap();
         if let Some(stream) = active_streams.get(&frame.header.stream_id) {
             stream.lock().unwrap().send(&frame);
@@ -246,11 +250,15 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     fn run_rx(connection: Arc<Self>, queue_tx: ResponseQueueTx, mut tcp_reader: BufReader<TcpStream>) {
         println!("Rx thread started");
         loop {
-            let frame  = match Frame::try_read_from_buf(&mut tcp_reader) {
+            let frame = match Frame::try_read_from_buf(&mut tcp_reader) {
                 Ok(frame) => frame,
+                Err(frames::error::DeserializationError::Header(frames::error::HeaderDeserializationError::UnknownFrameType(_))) => {
+                    let zeroed_data: Bytes = BytesMut::zeroed(8).into();
+                    Frame::new(0, 0, FrameBody::Ping { data: zeroed_data })
+                }
                 Err(err) => {
                     match err {
-                        frames::error::DeserializationError::BufReaderError => {},
+                        frames::error::DeserializationError::BufReaderError => break,
                         _ => {
                             println!("Closing connection because of error {:#?}", err);
                             connection.close_with_error(ErrorCode::ProtocolError, 0, queue_tx.clone());
@@ -285,6 +293,12 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 }
             }
             
+            {
+                let peer_settings = connection.peer_settings.lock().unwrap();
+                if frame.header.length > peer_settings.get(SettingsIdentifier::MaxFrameSize).unwrap() as usize {
+                    connection.close_with_error(ErrorCode::FrameSizeError, frame.header.stream_id, queue_tx.clone());
+                }
+            }
 
             let resp_frame: Result<Option<Frame>, ErrorCode> = match frame.payload.clone() {
                 // See section 6.5
