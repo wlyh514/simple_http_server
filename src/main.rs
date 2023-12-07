@@ -1,28 +1,33 @@
 use std::{
+    collections::VecDeque,
     fs,
     io::{prelude::*, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex, mpsc::{self, Receiver, Sender}},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc, Mutex,
+    },
     thread::{self, JoinHandle},
     time::Duration,
-    vec, collections::VecDeque,
+    vec,
 };
+
 pub mod http;
 pub mod http2;
+pub mod tls;
 
-use http::{ResponseStatus, HeaderVal};
-
+use http::{HeaderVal, ResponseStatus};
 
 type ResponseQueue = VecDeque<JoinHandle<String>>;
 
 enum RespHandlerSignal {
-    NewResp, 
+    NewResp,
     Finished,
 }
 
 fn handle_connection(stream: TcpStream) {
     let response_queue: Arc<Mutex<ResponseQueue>> = Arc::new(Mutex::new(VecDeque::new()));
-    
+
     let (resp_signal_tx, resp_signal_rx) = mpsc::channel::<RespHandlerSignal>();
     let response_queue_cp = response_queue.clone();
     let stream_cp = stream.try_clone().unwrap();
@@ -37,7 +42,7 @@ fn handle_connection(stream: TcpStream) {
 
         if line.is_empty() {
             // TODO: handle the case of request with body
-            
+
             // Wrap up this request, send to request handler
             let http_request_cp = http_request.clone();
             let resp_signal_tx_cp = resp_signal_tx.clone();
@@ -55,7 +60,11 @@ fn handle_connection(stream: TcpStream) {
     resp_signal_tx.send(RespHandlerSignal::Finished).unwrap();
 }
 
-fn handle_response(response_queue: Arc<Mutex<ResponseQueue>>, mut stream: TcpStream, resp_signal_rx: Receiver<RespHandlerSignal>) {
+fn handle_response(
+    response_queue: Arc<Mutex<ResponseQueue>>,
+    mut stream: TcpStream,
+    resp_signal_rx: Receiver<RespHandlerSignal>,
+) {
     loop {
         match resp_signal_rx.recv().unwrap() {
             RespHandlerSignal::NewResp => {
@@ -71,7 +80,7 @@ fn handle_response(response_queue: Arc<Mutex<ResponseQueue>>, mut stream: TcpStr
                         break;
                     }
                 }
-            }, 
+            }
             RespHandlerSignal::Finished => {
                 break;
             }
@@ -100,7 +109,8 @@ fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerS
 
     let contents = fs::read_to_string(format!("static/{file_name}")).unwrap();
     let content_length = contents.len();
-    let response = format!("{status_line}\r\nContent-Length: {content_length}\r\n\r\n{contents}\r\n");
+    let response =
+        format!("{status_line}\r\nContent-Length: {content_length}\r\n\r\n{contents}\r\n");
 
     resp_signal_tx.send(RespHandlerSignal::NewResp).unwrap();
     return response;
@@ -121,25 +131,35 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
     let content_length = contents.len();
     let mut response = http::HTTPResponse::default();
 
-    response.headers.insert("access-control-allow-origin".into(), HeaderVal::Single("*".into()));
-    response.headers.insert("content-type".into(), HeaderVal::Single("text/html".into()));
-    response.headers.insert("content-length".into(), HeaderVal::Single(format!("{content_length}").into()));
-    
+    response.headers.insert(
+        "access-control-allow-origin".into(),
+        HeaderVal::Single("*".into()),
+    );
+    response
+        .headers
+        .insert("content-type".into(), HeaderVal::Single("text/html".into()));
+    response.headers.insert(
+        "content-length".into(),
+        HeaderVal::Single(format!("{content_length}").into()),
+    );
+
     response.body = Some(contents.into());
 
     response
 }
 
 fn main() {
-    let host = "localhost:7878";
-    let listener = TcpListener::bind(host).unwrap();
+    let host: &str = "localhost:7878";
+    let listener: TcpListener = TcpListener::bind(host).unwrap();
+    let tls_config: Arc<rustls::ServerConfig> = tls::config_tls();
 
-    let h2_server = http2::server::Server::new(request_handler);
+    let h2_server: http2::server::Server<fn(http::HTTPRequest) -> http::HTTPResponse> =
+        http2::server::Server::new(request_handler);
 
     println!("Server started on {host}");
 
     for stream in listener.incoming() {
-        let stream = stream.unwrap();
+        let stream: TcpStream = stream.unwrap();
 
         h2_server.handle_connection(stream);
     }
