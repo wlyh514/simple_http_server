@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 
 use crate::{
     http::{hdr_map_size, HTTPRequest, HTTPResponse, HeaderVal, ReqHandlerFn},
-    http2::{stream::{StreamState, ReqAssemblerState}, frames::{self, PingFlags}},
+    http2::{stream::{StreamState, ReqAssemblerState}, frames::{self, PingFlags, error::{DeserializationError, BodyDeserializationError, HeaderDeserializationError}}},
 };
 
 use super::{
@@ -68,7 +68,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         id: usize
     ) -> Connection<T> {
         let mut peer_settings = SettingsMap::default();
-        peer_settings.update_with_vec(&peer_settings_params);
+        peer_settings.update_with_vec(&peer_settings_params).unwrap();
         Connection {
             peer_settings: Arc::new(Mutex::new(peer_settings)),
             max_stream_id: Arc::new(AtomicU32::new(0)),
@@ -247,12 +247,151 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         }
     }
 
+    fn handle_frame(&self, frame: &Frame) -> Result<Option<Frame>, ErrorCode> {
+        match &frame.payload {
+            // Section 6.1
+            FrameBody::Data { pad_length, .. } => {
+                if frame.header.stream_id == 0x0 {
+                    Err(ErrorCode::ProtocolError)
+                } else if frame.header.length <= pad_length.unwrap_or(0) {
+                    Err(ErrorCode::ProtocolError)
+                } else {
+                    let active_streams = self.active_streams.lock().unwrap();
+                    match active_streams.get(&frame.header.stream_id) {
+                        Some(stream) => {
+                            let stream = stream.lock().unwrap();
+                            if stream.state != StreamState::Open && stream.state != StreamState::HalfClosedRemote {
+                                Err(ErrorCode::StreamClosed)
+                            } else {
+                                Ok(None)
+                            }
+                        },
+                        None => {
+                            Err(ErrorCode::StreamClosed)
+                        }
+                    }
+                }
+            },
+            // Section 6.2
+            FrameBody::Headers { pad_length, .. } => {
+                if frame.header.stream_id == 0x0 {
+                    Err(ErrorCode::ProtocolError)
+                } else if frame.header.length <= pad_length.unwrap_or(0) {
+                    Err(ErrorCode::ProtocolError)
+                } else {
+                    Ok(None)
+                }
+            }, 
+            // Section 6.3
+            FrameBody::Priority { stream_dep, .. } => {
+                if frame.header.stream_id == 0x0 || frame.header.stream_id == *stream_dep {
+                    Err(ErrorCode::ProtocolError)
+                } else if frame.header.length != 5 {
+                    Err(ErrorCode::FrameSizeError)
+                } else {
+                    Ok(None)
+                }
+            },
+            // Section 6.4
+            FrameBody::RstStream { .. } => {
+                if frame.header.length != 4 {
+                    Err(ErrorCode::FrameSizeError)
+                } else {
+                    let active_streams = self.active_streams.lock().unwrap();
+                    let stream = active_streams.get(&frame.header.stream_id);
+                    match stream {
+                        Some(stream) => {
+                            let stream = stream.lock().unwrap();
+                            if stream.state == StreamState::Idle {
+                                Err(ErrorCode::ProtocolError)
+                            } else {
+                                // Kill the stream
+                                Ok(None)
+                            }
+                        }, 
+                        None => Err(ErrorCode::ProtocolError)
+                    }
+                }
+            },
+            // Section 6.5
+            FrameBody::Settings(settings) => {
+                let flags = SettingsFlags::from_bits_retain(frame.header.flags);
+
+                // If settings frame is sent over stream other than 0x0, connection error
+                if frame.header.stream_id != 0x0 {
+                    Err(ErrorCode::ProtocolError)
+                } else if frame.header.length % 6 != 0 {
+                    Err(ErrorCode::FrameSizeError)
+                } else {
+                    if flags.contains(SettingsFlags::ACK) {
+                        if frame.header.length != 0 {
+                            Err(ErrorCode::FrameSizeError)
+                        } else {
+                            Ok(None)
+                        }
+                    } else {
+                        // Update self.settings, return an error if there's any inappropriate value.
+                        self.peer_settings.lock().unwrap().update_with_vec(&settings)?; 
+                        // Send ACK
+                        let flag = SettingsFlags::ACK;
+                        Ok(Some(Frame::new(
+                            0,
+                            flag.bits(),
+                            FrameBody::Settings(vec![]),
+                        )))
+                    }
+                }
+            },
+            // Section 6.6
+            FrameBody::PushPromise { .. } => {
+                // Receipt of PUSH_PROMISE frames is protocol error as we do not enable push.
+                Err(ErrorCode::ProtocolError)
+            },
+            // Section 6.7
+            FrameBody::Ping { data } => {
+                if frame.header.stream_id != 0x0 {
+                    Err(ErrorCode::ProtocolError)
+                } else if frame.header.length != 8 {
+                    Err(ErrorCode::FrameSizeError)
+                } else if frame.header.flags == PingFlags::ACK.bits() {
+                    Ok(None)
+                } else {
+                    Ok(Some(Frame::new(frame.header.stream_id, PingFlags::ACK.bits(), FrameBody::Ping { data: data.clone() })))
+                }
+            },
+            // Section 6.8
+            FrameBody::GoAway { .. } /* { last_stream_id, error_code, .. } */ => {
+                Err(ErrorCode::NoError)
+            },
+            // Section 6.9
+            FrameBody::WindowUpdate { window_size_increment } => {
+                if frame.header.length != 4 {
+                    Err(ErrorCode::FrameSizeError)
+                } else if *window_size_increment == 0 {
+                    Err(ErrorCode::FrameSizeError)
+                } else {
+                    Ok(None)
+                }
+            },
+            // Section 6.10
+            FrameBody::Continuation { .. } => {
+                if frame.header.stream_id == 0x0 {
+                    Err(ErrorCode::ProtocolError)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
     fn run_rx(connection: Arc<Self>, queue_tx: ResponseQueueTx, mut tcp_reader: BufReader<TcpStream>) {
         println!("Rx thread started");
         loop {
             let frame = match Frame::try_read_from_buf(&mut tcp_reader) {
                 Ok(frame) => frame,
-                Err(frames::error::DeserializationError::Header(frames::error::HeaderDeserializationError::UnknownFrameType(_))) => {
+                Err(DeserializationError::Header(HeaderDeserializationError::UnknownFrameType(_))) |
+                Err(DeserializationError::Body(BodyDeserializationError::UnknownSettingsIdentifier(_))) |
+                Err(DeserializationError::Body(BodyDeserializationError::UnknownErrorCode(_))) => {
                     let zeroed_data: Bytes = BytesMut::zeroed(8).into();
                     Frame::new(0, 0, FrameBody::Ping { data: zeroed_data })
                 }
@@ -300,76 +439,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 }
             }
 
-            let resp_frame: Result<Option<Frame>, ErrorCode> = match frame.payload.clone() {
-                // See section 6.5
-                FrameBody::Settings(settings) => {
-                    let flags = SettingsFlags::from_bits_retain(frame.header.flags);
-
-                    // If settings frame is sent over stream other than 0x0, connection error
-                    if frame.header.stream_id != 0x0 {
-                        Err(ErrorCode::ProtocolError)
-                    } else {
-                        if flags.contains(SettingsFlags::ACK) {
-                            if frame.header.length != 0 {
-                                Err(ErrorCode::FrameSizeError)
-                            } else {
-                                Ok(None)
-                            }
-                        } else {
-                            // Update self.settings
-                            connection.peer_settings.lock().unwrap().update_with_vec(&settings);
-
-                            // Send ACK
-                            let flag = SettingsFlags::ACK;
-                            Ok(Some(Frame::new(
-                                0,
-                                flag.bits(),
-                                FrameBody::Settings(vec![]),
-                            )))
-                        }
-                    }
-                },
-                // See section 6.7
-                FrameBody::Ping { data } => {
-                    if frame.header.flags == PingFlags::ACK.bits() {
-                        Ok(None)
-                    } else {
-                        Ok(Some(Frame::new(frame.header.stream_id, PingFlags::ACK.bits(), FrameBody::Ping { data })))
-                    }
-                },
-                // See section 6.4
-                FrameBody::RstStream { .. } => {
-                    if frame.header.length != 4 {
-                        Err(ErrorCode::FrameSizeError)
-                    } else {
-                        let active_streams = connection.active_streams.lock().unwrap();
-                        let stream = active_streams.get(&frame.header.stream_id);
-                        match stream {
-                            Some(stream) => {
-                                let stream = stream.lock().unwrap();
-                                if stream.state == StreamState::Idle {
-                                    Err(ErrorCode::ProtocolError)
-                                } else {
-                                    // Kill the stream
-                                    Ok(None)
-                                }
-                            }, 
-                            None => Err(ErrorCode::ProtocolError)
-                        }
-                    }
-                },
-                // Kill connection
-                FrameBody::GoAway { .. } => {
-                    break;
-                }
-                _ => {
-                    // let empty_bytes: Bytes = BytesMut::zeroed(8).into();
-                    // Ok(Some(Frame::new(frame.header.stream_id, 0, FrameBody::Ping { data: empty_bytes })))
-                    Ok(None)
-                },
-            };
-
-            match resp_frame {
+            match connection.handle_frame(&frame) {
                 Ok(Some(resp_frame)) => {
                     queue_tx.push(resp_frame);
                 }
@@ -382,29 +452,38 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
 
             if frame.header.stream_id > 0 {
                 let active_streams = connection.active_streams.lock().unwrap();
+                let stream_id = frame.header.stream_id;
                 let mut stream = active_streams
-                    .get(&frame.header.stream_id)
+                    .get(&stream_id)
                     .unwrap()
                     .lock()
                     .unwrap();
-                let req = match stream.recv(frame.clone()) {
+                match stream.recv(frame) {
                     Ok(Some(req)) => {
                         let tx = queue_tx.clone();
                         let connection_cp = connection.clone();
-                        thread::spawn(move || connection_cp.handle_request(req, frame.header.stream_id, tx));
+                        thread::spawn(move || connection_cp.handle_request(req, stream_id, tx));
                     }
                     Err(err) => {
                         // Close connection if connection error
-                        connection.close_with_error(err, frame.header.stream_id, queue_tx);
-                        break;
+                        match err {
+                            ErrorCode::ProtocolError => {
+                                connection.close_with_error(err, stream_id, queue_tx);
+                                break;
+                            }
+                            ErrorCode::StreamClosed => {
+                                queue_tx.push(Frame::new(stream_id, 0, FrameBody::RstStream { error_code: ErrorCode::StreamClosed }));
+                                println!("STREAM_CLOSED queued");
+                            }
+                            _ => ()
+                        }
                     }
                     _ => {}
                 };
                 if stream.state == StreamState::Closed {
                     println!("Stream {} closed. ", stream.id);
-                    connection.active_streams.lock().unwrap().remove(&stream.id);
+                    // connection.active_streams.lock().unwrap().remove(&stream.id);
                 }
-                req
             }
         }
     }
@@ -542,10 +621,11 @@ impl SettingsMap {
         }
     }
 
-    pub fn update_with_vec(&mut self, other: &Vec<SettingParam>) {
+    pub fn update_with_vec(&mut self, other: &Vec<SettingParam>) -> Result<(), ErrorCode> {
         for setting in other {
-            self.0.insert(setting.identifier.clone() as u16, setting.value);
+            self.set(setting.identifier.clone(), setting.value)?;
         }
+        Ok(())
     }
 }
 impl From<Vec<SettingParam>> for SettingsMap {

@@ -33,7 +33,8 @@ impl ReqAssembler {
         }
     }
 
-    pub fn recv_frame(&mut self, frame: Frame) {
+    pub fn recv_frame(&mut self, frame: Frame) -> Result<(), ()> {
+        // TODO: Check for error and return error codes
         let new_state: Option<ReqAssemblerState> = match self.state {
             ReqAssemblerState::Init => match &frame.payload {
                 FrameBody::Headers { hdr_block_frag, .. } => {
@@ -66,7 +67,7 @@ impl ReqAssembler {
                         None
                     }
                 }
-                _ => None,
+                _ => return Err(()),
             },
 
             ReqAssemblerState::ReadingBody => match &frame.payload {
@@ -89,12 +90,16 @@ impl ReqAssembler {
                         HeadersFlags::from_bits_retain(frame.header.flags);
 
                     if frame_flags.contains(HeadersFlags::END_STREAM) {
-                        Some(ReqAssemblerState::Done)
+                        if frame_flags.contains(HeadersFlags::END_HEADERS) {
+                            Some(ReqAssemblerState::Done)
+                        } else {
+                            Some(ReqAssemblerState::ReadingTrailer)
+                        }
                     } else {
-                        Some(ReqAssemblerState::ReadingTrailer)
+                        return Err(())
                     }
                 }
-                _ => None,
+                _ => return Err(()),
             },
 
             ReqAssemblerState::ReadingTrailer => match &frame.payload {
@@ -117,6 +122,7 @@ impl ReqAssembler {
         if let Some(new_state) = new_state {
             self.state = new_state
         };
+        Ok(())
     }
 
     pub fn assemble(&mut self) -> Result<HTTPRequest, ErrorCode>{
@@ -141,6 +147,44 @@ impl ReqAssembler {
                 let method = hdr_field_try_get_single_val(&headers, ":method")?;
                 let _scheme = hdr_field_try_get_single_val(&headers, ":scheme")?;
                 let path = hdr_field_try_get_single_val(&headers, ":path")?;
+                if path.is_empty() {
+                    return Err(ErrorCode::ProtocolError);
+                }
+
+                let known_pseudo_hdrs = [":method", ":scheme", ":path"]; 
+                // Section 8.1.2
+                for key in headers.keys() {
+                    for chr in key.chars() {
+                        if chr.is_uppercase() {
+                            return Err(ErrorCode::ProtocolError)
+                        }
+                    }
+                    if key.starts_with(":") && !known_pseudo_hdrs.contains(&key.as_str()) {
+                        return Err(ErrorCode::ProtocolError)
+                    }
+                }
+
+                // Validate content-length
+                if let Some(content_length) = headers.get("content-length") {
+                    match content_length {
+                        HeaderVal::Single(content_length) => {
+                            let content_length: usize = content_length.parse().map_err(|_| ErrorCode::ProtocolError)?;
+                            if content_length != self.body.len() {
+                                return Err(ErrorCode::ProtocolError);
+                            }
+                        }, 
+                        _ => return Err(ErrorCode::ProtocolError)
+                    }
+                }
+
+                // Ensure pseudo headers do not exist in trailers
+                if let Some(trailers) = &trailers {
+                    for key in trailers.keys() {
+                        if key.starts_with(":") {
+                            return Err(ErrorCode::ProtocolError)
+                        }
+                    }
+                }
 
                 let mut req = HTTPRequest::new(method.as_str(), path.as_str(), "HTTP/2");
                 req.headers = headers;
@@ -206,7 +250,8 @@ impl Stream {
             StreamState::Idle => match frame.payload {
                 FrameBody::PushPromise { .. } => StreamState::ReservedRemote,
                 FrameBody::Headers { .. } => StreamState::Open,
-                _ => self.state,
+                FrameBody::Priority { .. } => StreamState::Idle,
+                _ => return Err(ErrorCode::ProtocolError),
             },
 
             StreamState::Open => {
@@ -222,17 +267,21 @@ impl Stream {
 
             StreamState::ReservedRemote => match frame.payload {
                 FrameBody::RstStream { .. } => StreamState::Closed,
-                _ => self.state,
+                FrameBody::Headers { .. } => StreamState::HalfClosedLocal,
+                FrameBody::Priority { .. } => StreamState::ReservedRemote,
+                _ => return Err(ErrorCode::ProtocolError),
             },
 
             StreamState::ReservedLocal => match frame.payload {
                 FrameBody::RstStream { .. } => StreamState::Closed,
-                _ => self.state,
+                FrameBody::WindowUpdate { .. } | FrameBody::Priority { .. } => StreamState::ReservedLocal,
+                _ => return Err(ErrorCode::ProtocolError),
             },
 
             StreamState::HalfClosedRemote => match frame.payload {
                 FrameBody::RstStream { .. } => StreamState::Closed,
-                _ => self.state,
+                FrameBody::WindowUpdate { .. } | FrameBody::Priority { .. } => StreamState::HalfClosedRemote,
+                _ => return Err(ErrorCode::StreamClosed)
             },
 
             StreamState::HalfClosedLocal => {
@@ -246,13 +295,19 @@ impl Stream {
                 }
             }
 
-            StreamState::Closed => self.state,
+            StreamState::Closed => match frame.payload {
+                FrameBody::RstStream { .. } | FrameBody::WindowUpdate { .. } | FrameBody::Priority { .. } => StreamState::Closed,
+                _ => {
+                    println!("Return from here");
+                    return Err(ErrorCode::StreamClosed)
+                }
+            },
         };
         self.state = next_state;
 
         // TRY TODO: Support handling request before body is fully received
 
-        self.req_assembler.recv_frame(frame);
+        self.req_assembler.recv_frame(frame).map_err(|_| ErrorCode::ProtocolError)?;
         if end_of_stream {
             self.req_assembler.assemble().map(|req| Some(req))
         } else {
@@ -338,11 +393,8 @@ impl Stream {
 fn hdr_field_try_get_single_val(hdr_map: &HeadersMap, field_name: &str) -> Result<String, ErrorCode> {
     let vals = hdr_map.get(field_name);
     match vals {
-        Some(vals) => match vals {
-            HeaderVal::Single(val) => Ok(val.to_string()),
-            _ => Err(ErrorCode::ProtocolError),
-        },
-        None => Err(ErrorCode::ProtocolError),
+        Some(HeaderVal::Single(val)) => Ok(val.to_string()),
+        _ => Err(ErrorCode::ProtocolError),
     }
 }
 /// Compress headers using HPACK.
@@ -367,7 +419,22 @@ pub fn decompress_header(bytes: &[u8]) -> Result<HeadersMap, ErrorCode> {
                     String::from_utf8(key.to_vec()).map_err(|_| ErrorCode::CompressionError)?;
                 let value_str: String =
                     String::from_utf8(value.to_vec()).map_err(|_| ErrorCode::CompressionError)?;
-                hdrs.insert(key_str, HeaderVal::Single(value_str));
+
+                let new_val: Option<HeaderVal> = match hdrs.get_mut(&key_str) {
+                    Some(HeaderVal::Single(prev_val)) => {
+                        Some(HeaderVal::Multiple(vec![prev_val.clone(), value_str]))
+                    },
+                    Some(HeaderVal::Multiple(prev_vals)) => {
+                        prev_vals.push(value_str);
+                        None
+                    }
+                    None => {
+                        Some(HeaderVal::Single(value_str))
+                    }
+                };
+                if let Some(new_val) = new_val {
+                    hdrs.insert(key_str, new_val);
+                }
             }
             Ok(hdrs)
         }
