@@ -53,10 +53,11 @@ impl ResponseQueueTx {
 
 #[derive(Clone)]
 pub struct Connection<T: ReqHandlerFn + Copy> {
+    server_settings: Arc<Mutex<SettingsMap>>, 
     peer_settings: Arc<Mutex<SettingsMap>>,
-    /// max(id of every existed stream) + 1
     max_stream_id: Arc<AtomicU32>,
-    active_streams: Arc<Mutex<HashMap<u32, Arc<Mutex<Stream>>>>>,
+    concurrent_stream_count: Arc<AtomicU32>,
+    streams: Arc<Mutex<HashMap<u32, Arc<Mutex<Stream>>>>>,
     handler: T,
     id: usize,
 }
@@ -64,15 +65,18 @@ pub struct Connection<T: ReqHandlerFn + Copy> {
 impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     pub fn new(
         handler: T,
+        server_settings: SettingsMap,
         peer_settings_params: Vec<SettingParam>,
         id: usize
     ) -> Connection<T> {
         let mut peer_settings = SettingsMap::default();
         peer_settings.update_with_vec(&peer_settings_params).unwrap();
         Connection {
+            server_settings: Arc::new(Mutex::new(server_settings)),
             peer_settings: Arc::new(Mutex::new(peer_settings)),
             max_stream_id: Arc::new(AtomicU32::new(0)),
-            active_streams: Arc::new(Mutex::new(HashMap::new())),
+            concurrent_stream_count: Arc::new(AtomicU32::new(1)),
+            streams: Arc::new(Mutex::new(HashMap::new())),
             handler,
             id
         }
@@ -84,18 +88,18 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
 
         {
             // Close all idle streams with id smaller than the new stream
-            let mut active_streams = self.active_streams.lock().unwrap();
+            let mut streams = self.streams.lock().unwrap();
             let mut streams_to_close: Vec<u32> = vec![];
-            for (id, stream) in active_streams.iter() {
+            for (id, stream) in streams.iter() {
                 let stream = stream.lock().unwrap();
                 if stream.state == StreamState::Idle {
                     streams_to_close.push(*id);
                 }
             }
             for id in streams_to_close {
-                active_streams.remove(&id);
+                streams.remove(&id);
             }
-            active_streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
+            streams.insert(new_stream_id, Arc::new(Mutex::new(new_stream)));
         }
 
         self.max_stream_id.store(new_stream_id, Ordering::SeqCst);
@@ -103,8 +107,8 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
 
     /// Convert a http response into frames to be sent.
     fn make_frames(&self, stream_id: u32, mut response: HTTPResponse) -> Result<Vec<Frame>, ()> {
-        let active_streams = self.active_streams.lock().unwrap();
-        let stream = active_streams
+        let streams = self.streams.lock().unwrap();
+        let stream = streams
             .get(&stream_id)
             .map_or(Err(()), |val| Ok(val))?
             .lock()
@@ -223,8 +227,8 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         // Otherwise we skip this step, which would happen if:
         // a) We are sending a GOAWAY frame
         // b) We are sending a PRIORITY frame for a stream in CLOSED state.
-        let active_streams = self.active_streams.lock().unwrap();
-        if let Some(stream) = active_streams.get(&frame.header.stream_id) {
+        let streams = self.streams.lock().unwrap();
+        if let Some(stream) = streams.get(&frame.header.stream_id) {
             stream.lock().unwrap().send(&frame);
         }
         
@@ -256,8 +260,8 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 } else if frame.header.length <= pad_length.unwrap_or(0) {
                     Err(ErrorCode::ProtocolError)
                 } else {
-                    let active_streams = self.active_streams.lock().unwrap();
-                    match active_streams.get(&frame.header.stream_id) {
+                    let streams = self.streams.lock().unwrap();
+                    match streams.get(&frame.header.stream_id) {
                         Some(stream) => {
                             let stream = stream.lock().unwrap();
                             if stream.state != StreamState::Open && stream.state != StreamState::HalfClosedRemote {
@@ -297,8 +301,8 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 if frame.header.length != 4 {
                     Err(ErrorCode::FrameSizeError)
                 } else {
-                    let active_streams = self.active_streams.lock().unwrap();
-                    let stream = active_streams.get(&frame.header.stream_id);
+                    let streams = self.streams.lock().unwrap();
+                    let stream = streams.get(&frame.header.stream_id);
                     match stream {
                         Some(stream) => {
                             let stream = stream.lock().unwrap();
@@ -399,7 +403,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     match err {
                         frames::error::DeserializationError::BufReaderError => break,
                         _ => {
-                            println!("Closing connection because of error {:#?}", err);
+                            println!("Closing connection because error occured during frame deserialization: {:#?}", err);
                             connection.close_with_error(ErrorCode::ProtocolError, 0, queue_tx.clone());
                         }
                     };
@@ -410,14 +414,20 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
             dbg!(connection.id, "recv", &frame);
 
             if frame.header.stream_id > connection.max_stream_id.load(Ordering::SeqCst) {
-                connection.new_stream(frame.header.stream_id);
+                if frame.header.stream_id % 2 == 1 {
+                    connection.new_stream(frame.header.stream_id);
+                } else {
+                    println!("Client initiates an even numbered stream id, closing connection. ");
+                    connection.close_with_error(ErrorCode::ProtocolError, frame.header.stream_id, queue_tx.clone());
+                    break;
+                }
             }
 
             // Section 8.1: Other frames (from any stream) MUST NOT occur between the HEADERS frame and any CONTINUATION frames that might follow
             {
-                let active_streams = connection.active_streams.lock().unwrap();
-                for stream_id in active_streams.keys() {
-                    let stream = active_streams.get(stream_id).unwrap().lock().unwrap();
+                let streams = connection.streams.lock().unwrap();
+                for stream_id in streams.keys() {
+                    let stream = streams.get(stream_id).unwrap().lock().unwrap();
                     dbg!(stream_id, stream.get_req_assembler_state());
                     if *stream.get_req_assembler_state() == ReqAssemblerState::ReadingHeader {
                         match frame.payload {
@@ -433,8 +443,9 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
             }
             
             {
-                let peer_settings = connection.peer_settings.lock().unwrap();
-                if frame.header.length > peer_settings.get(SettingsIdentifier::MaxFrameSize).unwrap() as usize {
+                let max_frame_size = connection.peer_settings.lock().unwrap().get(SettingsIdentifier::MaxFrameSize).unwrap() as usize;
+                if frame.header.length > max_frame_size {
+                    println!("Closing connection {} because it receives a frame of length {}, while the max frame size is {}. ", connection.id, frame.header.length, max_frame_size);
                     connection.close_with_error(ErrorCode::FrameSizeError, frame.header.stream_id, queue_tx.clone());
                 }
             }
@@ -450,14 +461,17 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 _ => {}
             }
 
+
             if frame.header.stream_id > 0 {
-                let active_streams = connection.active_streams.lock().unwrap();
+                let streams = connection.streams.lock().unwrap();
                 let stream_id = frame.header.stream_id;
-                let mut stream = active_streams
+                let mut stream = streams
                     .get(&stream_id)
                     .unwrap()
                     .lock()
                     .unwrap();
+
+                let stream_active_before = stream.state.is_active(); 
                 match stream.recv(frame) {
                     Ok(Some(req)) => {
                         let tx = queue_tx.clone();
@@ -467,22 +481,40 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     Err(err) => {
                         // Close connection if connection error
                         match err {
-                            ErrorCode::ProtocolError => {
-                                connection.close_with_error(err, stream_id, queue_tx);
-                                break;
-                            }
                             ErrorCode::StreamClosed => {
                                 queue_tx.push(Frame::new(stream_id, 0, FrameBody::RstStream { error_code: ErrorCode::StreamClosed }));
                                 println!("STREAM_CLOSED queued");
+                            },
+                            _ => {
+                                println!("Error occurred while updating the stream state machine.");
+                                connection.close_with_error(err, stream_id, queue_tx);
+                                break;
                             }
-                            _ => ()
                         }
                     }
                     _ => {}
                 };
+                let stream_active_after = stream.state.is_active();
+
+                // Section 5.1.2
+                {
+                    if stream_active_before && !stream_active_after {
+                        connection.concurrent_stream_count.fetch_sub(1, Ordering::SeqCst);
+                    } else if !stream_active_before && stream_active_after {
+                        connection.concurrent_stream_count.fetch_add(1, Ordering::SeqCst);
+                    }
+                    let max_concurrent_streams = connection.server_settings.lock().unwrap().get(SettingsIdentifier::MaxConcurrentStreams).unwrap();
+                    if connection.concurrent_stream_count.load(Ordering::SeqCst) > max_concurrent_streams {
+                        println!("Concurrent streams exceeds limit, closing connection {}.", connection.id); 
+                        connection.close_with_error(ErrorCode::ProtocolError, stream_id, queue_tx.clone());
+                        break;
+                    }
+                }
+                
+                
                 if stream.state == StreamState::Closed {
                     println!("Stream {} closed. ", stream.id);
-                    // connection.active_streams.lock().unwrap().remove(&stream.id);
+                    // connection.streams.lock().unwrap().remove(&stream.id);
                 }
             }
         }
@@ -588,6 +620,7 @@ impl SettingsIdentifier {
         }
     }
 }
+#[derive(Clone)]
 pub struct SettingsMap(HashMap<u16, u32>);
 impl SettingsMap {
     /// Create a SettingsMap with default values

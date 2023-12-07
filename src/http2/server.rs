@@ -59,7 +59,7 @@ impl<T: ReqHandlerFn + Copy> Server<T> {
         server_settings.set(SettingsIdentifier::EnablePush, 0).ok()?;   // Since curl does not support server pushing
 
         // Send server preface
-        let server_preface_frame = Frame::new(0, 0, FrameBody::Settings(server_settings.into()));
+        let server_preface_frame = Frame::new(0, 0, FrameBody::Settings(server_settings.clone().into()));
         let server_preface_bytes: Bytes = server_preface_frame.try_into().ok()?;
         tcp_writer.write_all(server_preface_bytes.as_ref()).ok()?;
         tcp_writer.flush().unwrap();
@@ -74,7 +74,7 @@ impl<T: ReqHandlerFn + Copy> Server<T> {
 
         let connection_count = self.connection_count.fetch_add(1, Ordering::SeqCst);
         // Create connection struct
-        let connection: Connection<T> = Connection::new(self.handler, settings, connection_count);
+        let connection: Connection<T> = Connection::new(self.handler, server_settings, settings, connection_count);
         println!("Connection Established");
         thread::spawn(move || connection.run(tcp_reader, tcp_writer));
         None

@@ -130,6 +130,8 @@ impl ReqAssembler {
             ReqAssemblerState::Done => {
                 let headers =
                     decompress_header(&self.hdr_block).map_err(|_| ErrorCode::CompressionError)?;
+                // println!("Header decompressed");
+                // dbg!(&headers);
 
                 let body: Option<Bytes> = match self.body.len() {
                     0 => None,
@@ -150,8 +152,9 @@ impl ReqAssembler {
                 if path.is_empty() {
                     return Err(ErrorCode::ProtocolError);
                 }
+                // println!("Request pseudo header check passed");
 
-                let known_pseudo_hdrs = [":method", ":scheme", ":path"]; 
+                let known_pseudo_hdrs = [":method", ":scheme", ":path", ":authority"]; 
                 // Section 8.1.2
                 for key in headers.keys() {
                     for chr in key.chars() {
@@ -162,7 +165,15 @@ impl ReqAssembler {
                     if key.starts_with(":") && !known_pseudo_hdrs.contains(&key.as_str()) {
                         return Err(ErrorCode::ProtocolError)
                     }
+                    // Section 8.1.2.2
+                    if key == "connection" {
+                        return Err(ErrorCode::ProtocolError)
+                    }
+                    if key == "te" && hdr_field_try_get_single_val(&headers, key)? != "trailers" {
+                        return Err(ErrorCode::ProtocolError)
+                    }
                 }
+                // println!("Request header fields check passed");
 
                 // Validate content-length
                 if let Some(content_length) = headers.get("content-length") {
@@ -176,6 +187,7 @@ impl ReqAssembler {
                         _ => return Err(ErrorCode::ProtocolError)
                     }
                 }
+                // println!("Conent-Length check passed");
 
                 // Ensure pseudo headers do not exist in trailers
                 if let Some(trailers) = &trailers {
@@ -185,6 +197,7 @@ impl ReqAssembler {
                         }
                     }
                 }
+                // println!("Trailers check passed");
 
                 let mut req = HTTPRequest::new(method.as_str(), path.as_str(), "HTTP/2");
                 req.headers = headers;
@@ -207,7 +220,7 @@ pub struct Stream {
     pub state: StreamState,
     req_assembler: ReqAssembler,
 }
-#[derive(PartialEq, Clone, Copy)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub enum StreamState {
     Idle,
     Open,
@@ -216,6 +229,14 @@ pub enum StreamState {
     HalfClosedRemote,
     HalfClosedLocal,
     Closed,
+}
+impl StreamState {
+    pub fn is_active(&self) -> bool {
+        match self {
+            Self::Open | Self::HalfClosedLocal | Self::HalfClosedRemote => true,
+            _ => false,
+        }
+    }
 }
 
 
@@ -244,6 +265,8 @@ impl Stream {
             }
             _ => false,
         };
+
+        dbg!(&self.state);
 
         // The state machine defined in section 5.1
         let next_state: StreamState = match self.state {
@@ -305,10 +328,15 @@ impl Stream {
         };
         self.state = next_state;
 
+        dbg!(&self.state);
+
         // TRY TODO: Support handling request before body is fully received
 
-        self.req_assembler.recv_frame(frame).map_err(|_| ErrorCode::ProtocolError)?;
-        if end_of_stream {
+        self.req_assembler.recv_frame(frame).map_err(|_| {
+            println!("Error occurred while updating the request assembler state machine");
+            ErrorCode::ProtocolError
+        })?;
+        if self.req_assembler.state == ReqAssemblerState::Done {
             self.req_assembler.assemble().map(|req| Some(req))
         } else {
             Ok(None)
@@ -411,6 +439,7 @@ pub fn compress_header(hdrs: &HeadersMap) -> Bytes {
 /// See https://httpwg.org/specs/rfc7541.html.
 pub fn decompress_header(bytes: &[u8]) -> Result<HeadersMap, ErrorCode> {
     let mut decoder: Decoder = Decoder::new();
+    let mut pseudo_headers = true;
     match decoder.decode(bytes) {
         Ok(header_list) => {
             let mut hdrs: HeadersMap = HeadersMap::new();
@@ -419,6 +448,13 @@ pub fn decompress_header(bytes: &[u8]) -> Result<HeadersMap, ErrorCode> {
                     String::from_utf8(key.to_vec()).map_err(|_| ErrorCode::CompressionError)?;
                 let value_str: String =
                     String::from_utf8(value.to_vec()).map_err(|_| ErrorCode::CompressionError)?;
+
+                if !pseudo_headers && key_str.starts_with(":") {
+                    return Err(ErrorCode::ProtocolError)
+                }
+                if pseudo_headers && !key_str.starts_with(":") {
+                    pseudo_headers = false;
+                }
 
                 let new_val: Option<HeaderVal> = match hdrs.get_mut(&key_str) {
                     Some(HeaderVal::Single(prev_val)) => {
