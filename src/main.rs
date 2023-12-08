@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{VecDeque, HashMap},
     fs,
     io::{prelude::*, BufReader},
     net::{TcpListener, TcpStream},
@@ -131,9 +131,11 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
     let content_length = contents.len();
     let mut response = http::HTTPResponse::default();
 
-    response.set("access-control-allow-origin", "*");
-    response.set("content-type", "text/html");
-    response.set("content-length", &format!("{content_length}"));
+    response.set_multiple(HashMap::from([
+        ("access-control-allow-origin", "*"),
+        ("content-type", "text/html"),
+        ("content-length", &format!("{content_length}"))
+    ]));
 
     response.body = Some(contents.into());
 

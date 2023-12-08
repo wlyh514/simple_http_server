@@ -95,6 +95,12 @@ impl HTTPResponse {
     pub fn set(&mut self, field: &str, value: &str) {
         self.headers.insert(field.into(), HeaderVal::Single(value.into()));
     }
+
+    pub fn set_multiple(&mut self, values: HashMap<&str, &str>) {
+        for (field, value) in values {
+            self.headers.insert(field.into(), HeaderVal::Single(value.into()));
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
