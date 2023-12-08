@@ -131,17 +131,9 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
     let content_length = contents.len();
     let mut response = http::HTTPResponse::default();
 
-    response.headers.insert(
-        "access-control-allow-origin".into(),
-        HeaderVal::Single("*".into()),
-    );
-    response
-        .headers
-        .insert("content-type".into(), HeaderVal::Single("text/html".into()));
-    response.headers.insert(
-        "content-length".into(),
-        HeaderVal::Single(format!("{content_length}").into()),
-    );
+    response.set("access-control-allow-origin", "*");
+    response.set("content-type", "text/html");
+    response.set("content-length", &format!("{content_length}"));
 
     response.body = Some(contents.into());
 

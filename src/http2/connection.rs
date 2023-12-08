@@ -126,10 +126,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
 
         // Write response pseudoheaders
         let status_code = response.status.clone() as u32;
-        response.headers.insert(
-            ":status".to_string(),
-            HeaderVal::Single(status_code.to_string()),
-        );
+        response.set(":status", &status_code.to_string());
 
         let header_bytes = compress_header(&response.headers);
 

@@ -92,6 +92,9 @@ impl HTTPResponse {
             trailers: None,
         }
     }
+    pub fn set(&mut self, field: &str, value: &str) {
+        self.headers.insert(field.into(), HeaderVal::Single(value.into()));
+    }
 }
 
 #[derive(Debug, Clone)]
