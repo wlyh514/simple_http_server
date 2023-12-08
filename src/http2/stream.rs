@@ -22,6 +22,7 @@ struct ReqAssembler {
     body: BytesMut, 
     trailer_block: BytesMut,
     state: ReqAssemblerState,
+    end_of_stream: bool, 
 }
 impl ReqAssembler {
     pub fn new() -> Self {
@@ -30,11 +31,11 @@ impl ReqAssembler {
             body: BytesMut::new(), 
             trailer_block: BytesMut::new(),
             state: ReqAssemblerState::Init,
+            end_of_stream: false,
         }
     }
 
     pub fn recv_frame(&mut self, frame: Frame) -> Result<(), ()> {
-        // TODO: Check for error and return error codes
         let new_state: Option<ReqAssemblerState> = match self.state {
             ReqAssemblerState::Init => match &frame.payload {
                 FrameBody::Headers { hdr_block_frag, .. } => {
@@ -44,9 +45,15 @@ impl ReqAssembler {
                         HeadersFlags::from_bits_retain(frame.header.flags);
 
                     if frame_flags.contains(HeadersFlags::END_STREAM) {
-                        Some(ReqAssemblerState::Done)
-                    } else if frame_flags.contains(HeadersFlags::END_HEADERS) {
-                        Some(ReqAssemblerState::ReadingBody)
+                        self.end_of_stream = true;
+                    }
+
+                    if frame_flags.contains(HeadersFlags::END_HEADERS) {
+                        if self.end_of_stream {
+                            Some(ReqAssemblerState::Done)
+                        } else {
+                            Some(ReqAssemblerState::ReadingBody)
+                        }
                     } else {
                         Some(ReqAssemblerState::ReadingHeader)
                     }
@@ -62,7 +69,11 @@ impl ReqAssembler {
                         ContinuationFlags::from_bits_retain(frame.header.flags);
 
                     if frame_flags.contains(ContinuationFlags::END_HEADERS) {
-                        Some(ReqAssemblerState::ReadingBody)
+                        if self.end_of_stream {
+                            Some(ReqAssemblerState::Done)
+                        } else {
+                            Some(ReqAssemblerState::ReadingBody)
+                        }
                     } else {
                         None
                     }
@@ -78,6 +89,7 @@ impl ReqAssembler {
                         DataFlags::from_bits_retain(frame.header.flags);
 
                     if frame_flags.contains(DataFlags::END_STREAM) {
+                        self.end_of_stream = true;
                         Some(ReqAssemblerState::Done)
                     } else {
                         None
@@ -90,6 +102,7 @@ impl ReqAssembler {
                         HeadersFlags::from_bits_retain(frame.header.flags);
 
                     if frame_flags.contains(HeadersFlags::END_STREAM) {
+                        self.end_of_stream = true;
                         if frame_flags.contains(HeadersFlags::END_HEADERS) {
                             Some(ReqAssemblerState::Done)
                         } else {
@@ -117,7 +130,14 @@ impl ReqAssembler {
                 _ => None,
             },
 
-            ReqAssemblerState::Done => None,
+            ReqAssemblerState::Done => {
+                match frame.payload {
+                    FrameBody::Headers { .. } | FrameBody::Continuation { .. } | FrameBody::Data { .. } => {
+                        return Err(());
+                    },
+                    _ => None
+                }
+            },
         };
         if let Some(new_state) = new_state {
             self.state = new_state
@@ -131,7 +151,7 @@ impl ReqAssembler {
                 let headers =
                     decompress_header(&self.hdr_block).map_err(|_| ErrorCode::CompressionError)?;
                 // println!("Header decompressed");
-                // dbg!(&headers);
+                dbg!(&headers);
 
                 let body: Option<Bytes> = match self.body.len() {
                     0 => None,
@@ -272,7 +292,14 @@ impl Stream {
         let next_state: StreamState = match self.state {
             StreamState::Idle => match frame.payload {
                 FrameBody::PushPromise { .. } => StreamState::ReservedRemote,
-                FrameBody::Headers { .. } => StreamState::Open,
+                FrameBody::Headers { .. } => {
+                    let flags = HeadersFlags::from_bits_retain(frame.header.flags);
+                    if flags.contains(HeadersFlags::END_STREAM) && flags.contains(HeadersFlags::END_HEADERS) {
+                        StreamState::HalfClosedRemote
+                    } else {
+                        StreamState::Open
+                    }
+                },
                 FrameBody::Priority { .. } => StreamState::Idle,
                 _ => return Err(ErrorCode::ProtocolError),
             },

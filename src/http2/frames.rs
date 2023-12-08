@@ -87,9 +87,9 @@ pub struct SettingParam {
 
 #[derive(Clone, Debug)]
 pub struct HeadersBodyPriority {
-    e: bool, 
-    stream_dep: u32, 
-    weight: u8,
+    pub e: bool, 
+    pub stream_dep: u32, 
+    pub weight: u8,
 }
 
 /// See RFC7540 section 6

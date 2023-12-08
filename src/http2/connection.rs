@@ -277,11 +277,17 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 }
             },
             // Section 6.2
-            FrameBody::Headers { pad_length, .. } => {
+            FrameBody::Headers { pad_length, priority, .. } => {
                 if frame.header.stream_id == 0x0 {
                     Err(ErrorCode::ProtocolError)
                 } else if frame.header.length <= pad_length.unwrap_or(0) {
                     Err(ErrorCode::ProtocolError)
+                } else if let Some(priority) = priority {
+                    if priority.stream_dep == frame.header.stream_id {
+                        Err(ErrorCode::ProtocolError)
+                    } else {
+                        Ok(None)
+                    }
                 } else {
                     Ok(None)
                 }
@@ -391,9 +397,16 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     fn run_rx(connection: Arc<Self>, queue_tx: ResponseQueueTx, mut tcp_reader: BufReader<TcpStream>) {
         println!("Rx thread started");
         loop {
+            let mut unknown_frame = false;
             let frame = match Frame::try_read_from_buf(&mut tcp_reader) {
                 Ok(frame) => frame,
-                Err(DeserializationError::Header(HeaderDeserializationError::UnknownFrameType(_))) |
+                Err(DeserializationError::Header(HeaderDeserializationError::UnknownFrameType(_)))  => {
+                    // Section 5.5: No unknown/extension frame can be received within header block. 
+                    unknown_frame = true;
+
+                    let zeroed_data: Bytes = BytesMut::zeroed(8).into();
+                    Frame::new(0, 0, FrameBody::Ping { data: zeroed_data })
+                },
                 Err(DeserializationError::Body(BodyDeserializationError::UnknownSettingsIdentifier(_))) |
                 Err(DeserializationError::Body(BodyDeserializationError::UnknownErrorCode(_))) => {
                     let zeroed_data: Bytes = BytesMut::zeroed(8).into();
@@ -430,6 +443,11 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     let stream = streams.get(stream_id).unwrap().lock().unwrap();
                     dbg!(stream_id, stream.get_req_assembler_state());
                     if *stream.get_req_assembler_state() == ReqAssemblerState::ReadingHeader {
+                        if unknown_frame {
+                            println!("stream {} received unknown/extension frame while a Continuation is expected. ", stream_id);
+                            connection.close_with_error(ErrorCode::ProtocolError, frame.header.stream_id, queue_tx.clone());
+                            return; 
+                        }
                         match frame.payload {
                             FrameBody::Continuation { .. } => {},
                             _ => {
@@ -481,10 +499,10 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     Err(err) => {
                         // Close connection if connection error
                         match err {
-                            ErrorCode::StreamClosed => {
-                                queue_tx.push(Frame::new(stream_id, 0, FrameBody::RstStream { error_code: ErrorCode::StreamClosed }));
-                                println!("STREAM_CLOSED queued");
-                            },
+                            // ErrorCode::StreamClosed => {
+                            //     queue_tx.push(Frame::new(stream_id, 0, FrameBody::RstStream { error_code: ErrorCode::StreamClosed }));
+                            //     println!("STREAM_CLOSED queued");
+                            // },
                             _ => {
                                 println!("Error occurred while updating the stream state machine.");
                                 connection.close_with_error(err, stream_id, queue_tx);
