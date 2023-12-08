@@ -90,7 +90,7 @@ Hypertext Transfer Protocol Version 2 (HTTP/2)
           5: Sends a SETTINGS frame with unknown identifier        ✔ 5: Sends a SETTINGS frame with unknown identifier
 
       6.5.3. Settings Synchronization
-          1: Sends multiple values of SETTINGS_INITIAL_WINDOW_SIZE        using source address 127.0.0.1:36474
+          1: Sends multiple values of SETTINGS_INITIAL_WINDOW_SIZE        using source address 127.0.0.1:48786
         × 1: Sends multiple values of SETTINGS_INITIAL_WINDOW_SIZE
         Error: Timeout
           2: Sends a SETTINGS frame without ACK flag        ✔ 2: Sends a SETTINGS frame without ACK flag
@@ -110,25 +110,21 @@ Hypertext Transfer Protocol Version 2 (HTTP/2)
         3: Sends a WINDOW_UPDATE frame with a length other than 4 octets      ✔ 3: Sends a WINDOW_UPDATE frame with a length other than 4 octets
 
       6.9.1. The Flow-Control Window
-          1: Sends SETTINGS frame to set the initial window size to 1 and sends HEADERS frame        using source address 127.0.0.1:36568
+          1: Sends SETTINGS frame to set the initial window size to 1 and sends HEADERS frame        using source address 127.0.0.1:52298
         × 1: Sends SETTINGS frame to set the initial window size to 1 and sends HEADERS frame
         Error: Timeout
-          2: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1        using source address 127.0.0.1:36582
-        × 2: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1
-          -> The endpoint MUST sends a GOAWAY frame with a FLOW_CONTROL_ERROR code.
-             Expected: GOAWAY Frame (Error Code: FLOW_CONTROL_ERROR)
-               Actual: Timeout
-          3: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream        using source address 127.0.0.1:36590
+          2: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1        ✔ 2: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1
+          3: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream        using source address 127.0.0.1:52314
         × 3: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream
           -> The endpoint MUST sends a RST_STREAM frame with a FLOW_CONTROL_ERROR code.
              Expected: RST_STREAM Frame (Error Code: FLOW_CONTROL_ERROR)
                Actual: Connection closed
 
       6.9.2. Initial Flow-Control Window Size
-          1: Changes SETTINGS_INITIAL_WINDOW_SIZE after sending HEADERS frame        using source address 127.0.0.1:36592
+          1: Changes SETTINGS_INITIAL_WINDOW_SIZE after sending HEADERS frame        using source address 127.0.0.1:52320
         × 1: Changes SETTINGS_INITIAL_WINDOW_SIZE after sending HEADERS frame
         Error: Timeout
-          2: Sends a SETTINGS frame for window size to be negative        using source address 127.0.0.1:35872
+          2: Sends a SETTINGS frame for window size to be negative        using source address 127.0.0.1:52338
         × 2: Sends a SETTINGS frame for window size to be negative
         Error: Timeout
           3: Sends a SETTINGS_INITIAL_WINDOW_SIZE settings with an exceeded maximum window size value        ✔ 3: Sends a SETTINGS_INITIAL_WINDOW_SIZE settings with an exceeded maximum window size value
@@ -184,33 +180,28 @@ Hypertext Transfer Protocol Version 2 (HTTP/2)
   6. Frame Definitions
     6.5. SETTINGS
       6.5.3. Settings Synchronization
-        using source address 127.0.0.1:36474
+        using source address 127.0.0.1:48786
         × 1: Sends multiple values of SETTINGS_INITIAL_WINDOW_SIZE
         Error: Timeout
 
     6.9. WINDOW_UPDATE
       6.9.1. The Flow-Control Window
-        using source address 127.0.0.1:36568
+        using source address 127.0.0.1:52298
         × 1: Sends SETTINGS frame to set the initial window size to 1 and sends HEADERS frame
         Error: Timeout
-        using source address 127.0.0.1:36582
-        × 2: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1
-          -> The endpoint MUST sends a GOAWAY frame with a FLOW_CONTROL_ERROR code.
-             Expected: GOAWAY Frame (Error Code: FLOW_CONTROL_ERROR)
-               Actual: Timeout
-        using source address 127.0.0.1:36590
+        using source address 127.0.0.1:52314
         × 3: Sends multiple WINDOW_UPDATE frames increasing the flow control window to above 2^31-1 on a stream
           -> The endpoint MUST sends a RST_STREAM frame with a FLOW_CONTROL_ERROR code.
              Expected: RST_STREAM Frame (Error Code: FLOW_CONTROL_ERROR)
                Actual: Connection closed
 
       6.9.2. Initial Flow-Control Window Size
-        using source address 127.0.0.1:36592
+        using source address 127.0.0.1:52320
         × 1: Changes SETTINGS_INITIAL_WINDOW_SIZE after sending HEADERS frame
         Error: Timeout
-        using source address 127.0.0.1:35872
+        using source address 127.0.0.1:52338
         × 2: Sends a SETTINGS frame for window size to be negative
         Error: Timeout
 
-Finished in 10.6439 seconds
-94 tests, 88 passed, 0 skipped, 6 failed
+Finished in 8.6482 seconds
+94 tests, 89 passed, 0 skipped, 5 failed

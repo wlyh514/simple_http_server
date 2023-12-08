@@ -57,6 +57,7 @@ pub struct Connection<T: ReqHandlerFn + Copy> {
     peer_settings: Arc<Mutex<SettingsMap>>,
     max_stream_id: Arc<AtomicU32>,
     concurrent_stream_count: Arc<AtomicU32>,
+    available_size: Arc<AtomicU32>,
     streams: Arc<Mutex<HashMap<u32, Arc<Mutex<Stream>>>>>,
     handler: T,
     id: usize,
@@ -76,15 +77,24 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
             peer_settings: Arc::new(Mutex::new(peer_settings)),
             max_stream_id: Arc::new(AtomicU32::new(0)),
             concurrent_stream_count: Arc::new(AtomicU32::new(1)),
+            available_size: Arc::new(AtomicU32::new(65535)),
             streams: Arc::new(Mutex::new(HashMap::new())),
             handler,
             id
         }
     }
 
+    fn get_window_size(&self) -> u32 {
+        self.available_size.load(Ordering::SeqCst)
+    }
+
+    fn set_window_size(&self, size: u32) {
+        self.available_size.store(size, Ordering::SeqCst)
+    }
+
     fn new_stream(&self, new_stream_id: u32) {
         assert!(new_stream_id > self.max_stream_id.load(Ordering::SeqCst));
-        let new_stream = Stream::new(new_stream_id);
+        let new_stream = Stream::new(new_stream_id, self.peer_settings.clone());
 
         {
             // Close all idle streams with id smaller than the new stream
@@ -106,7 +116,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     }
 
     /// Convert a http response into frames to be sent.
-    fn make_frames(&self, stream_id: u32, mut response: HTTPResponse) -> Result<Vec<Frame>, ()> {
+    fn make_header_frames(&self, stream_id: u32, response: &mut HTTPResponse) -> Result<Vec<Frame>, ()> {
         let streams = self.streams.lock().unwrap();
         let stream = streams
             .get(&stream_id)
@@ -115,7 +125,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
             .unwrap();
 
         // Write response pseudoheaders
-        let status_code = response.status as u32;
+        let status_code = response.status.clone() as u32;
         response.headers.insert(
             ":status".to_string(),
             HeaderVal::Single(status_code.to_string()),
@@ -125,7 +135,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
 
         // Load relavent settings
         let hdr_partition_size: usize;
-        let body_partition_size: usize;
         let max_hdr_size: usize;
         {
             let settings = self.peer_settings.lock().unwrap();
@@ -136,8 +145,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 frame_partition_size,
             );
             max_hdr_size = settings.get(SettingsIdentifier::MaxHeaderListSize).unwrap() as usize;
-
-            body_partition_size = frame_partition_size;
         }
         if max_hdr_size < hdr_map_size(&response.headers) {
             Err(())
@@ -191,30 +198,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 hdr_remaining_bytes -= bytes_taken;
             }
 
-            // Body frames
-            if let Some(body_bytes) = response.body {
-                let mut body_remaining_bytes = body_bytes.len();
-                while body_remaining_bytes > 0 {
-                    let bytes_taken = usize::min(body_remaining_bytes, body_partition_size);
-
-                    let mut flags = DataFlags::from_bits_retain(0);
-                    if body_remaining_bytes < body_partition_size {
-                        flags |= DataFlags::END_STREAM;
-                    }
-
-                    frames.push(Frame::new(
-                        stream_id,
-                        flags.bits(),
-                        FrameBody::Data {
-                            pad_length: None,
-                            data: body_bytes.slice(..bytes_taken),
-                        },
-                    ));
-
-                    body_remaining_bytes -= bytes_taken;
-                }
-            }
-
             Ok(frames)
         }
     }
@@ -240,12 +223,24 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     }
 
     fn handle_request(&self, req: HTTPRequest, stream_id: u32, queue_tx: ResponseQueueTx) {
-        let resp = (self.handler)(req);
-        match self.make_frames(stream_id, resp) {
+        let mut resp = (self.handler)(req);
+        match self.make_header_frames(stream_id, &mut resp) {
             Ok(frames) => {
                 for frame in frames {
                     queue_tx.push(frame)
                 }
+                if let Some(body) = resp.body {
+                    if let Some(stream) = self.streams.lock().unwrap().get(&stream_id) {
+                        let mut stream = stream.lock().unwrap();
+                        stream.push_data(body);
+                        if let Some(data_frames) = stream.get_ready_data_frames() {
+                            for frame in data_frames {
+                                queue_tx.push(frame);
+                            }
+                        }
+                    }
+                }
+                
             }
             Err(_) => (),
         }
@@ -342,6 +337,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     } else {
                         // Update self.settings, return an error if there's any inappropriate value.
                         self.peer_settings.lock().unwrap().update_with_vec(&settings)?; 
+                        
                         // Send ACK
                         let flag = SettingsFlags::ACK;
                         Ok(Some(Frame::new(
@@ -468,6 +464,39 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 }
             }
 
+            // Flow control
+            if let FrameBody::Settings(settings) = &frame.payload {
+                for param in settings {
+
+                    if param.identifier == SettingsIdentifier::InitialWindowSize {
+                        let window_size_delta = param.value as i64 - connection.peer_settings.lock().unwrap().get(SettingsIdentifier::InitialWindowSize).unwrap() as i64;
+                        let streams = connection.streams.lock().unwrap();
+                        for (_, stream) in streams.iter() {
+                            let mut stream = stream.lock().unwrap(); 
+                            if stream.state.is_active() {
+                                match stream.window_update(window_size_delta) {
+                                    Ok(_) => {
+                                        if let Some(data_frames) = stream.get_ready_data_frames() {
+                                            for frame in data_frames {
+                                                queue_tx.push(frame);
+                                            }
+                                        }
+                                    },
+                                    Err(_) => {
+                                        println!("Closing connection {} because window size overflow.", connection.id);
+                                        connection.close_with_error(ErrorCode::FlowControlError, frame.header.stream_id, queue_tx.clone());
+                                        break;
+                                    }
+                                }
+
+                                
+                            }
+                        }
+                    }
+
+                }
+            }
+
             match connection.handle_frame(&frame) {
                 Ok(Some(resp_frame)) => {
                     queue_tx.push(resp_frame);
@@ -477,6 +506,50 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     break;
                 }
                 _ => {}
+            }
+
+            // Flow control
+            if let FrameBody::WindowUpdate { window_size_increment } = &frame.payload {
+                match frame.header.stream_id {
+                    0 => {
+                        // A connection-wide window update
+                        let new_window_size = connection.get_window_size() + window_size_increment;
+                        if new_window_size > 2147483647 {
+                            println!("Closing connection {} because window size overflow.", connection.id);
+                            connection.close_with_error(ErrorCode::FlowControlError, frame.header.stream_id, queue_tx.clone());
+                            break;
+                        }
+                        connection.set_window_size(new_window_size);
+                        // Notify tx
+                        // tx_handle.thread().unpark();
+                    }
+                    stream_id => {
+                        match connection.streams.lock().unwrap().get(&stream_id) {
+                            Some(stream) => {
+                                let mut stream = stream.lock().unwrap();
+                                match stream.window_update(*window_size_increment as i64) {
+                                    Ok(_) => {
+                                        if let Some(data_frames) = stream.get_ready_data_frames() {
+                                            for frame in data_frames {
+                                                queue_tx.push(frame);
+                                            }
+                                        }
+                                    },
+                                    Err(_) => {
+                                        println!("Closing connection {} because window size overflow.", connection.id);
+                                        connection.close_with_error(ErrorCode::FlowControlError, frame.header.stream_id, queue_tx.clone());
+                                        break;
+                                    }
+                                }
+                            },
+                            None => {
+                                println!("Closing connection {} because the stream it refers to does not exist.", connection.id);
+                                connection.close_with_error(ErrorCode::FlowControlError, frame.header.stream_id, queue_tx.clone());
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
 
@@ -503,9 +576,9 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                             //     queue_tx.push(Frame::new(stream_id, 0, FrameBody::RstStream { error_code: ErrorCode::StreamClosed }));
                             //     println!("STREAM_CLOSED queued");
                             // },
-                            _ => {
+                            e => {
                                 println!("Error occurred while updating the stream state machine.");
-                                connection.close_with_error(err, stream_id, queue_tx);
+                                connection.close_with_error(e, stream_id, queue_tx);
                                 break;
                             }
                         }
@@ -548,8 +621,17 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                 }
             };
 
+            // Connection level flow control
+            // if let FrameBody::Data{ .. } = frame.payload {
+            //     let available_size = connection.get_window_size();
+            //     let payload_size = frame.payload.size(); // Make it pub!
+            //     while payload_size > available_size as usize {
+            //         thread::park();
+            //         let available_size = connection.get_window_size();
+            //     }
+            // }
+
             let _ = connection.send_frame(frame, &mut tcp_writer);
-            
         }
 
         // Close stream 0

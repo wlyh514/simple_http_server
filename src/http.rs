@@ -94,7 +94,7 @@ impl HTTPResponse {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[repr(u32)]
 pub enum ResponseStatus {
     // Informational

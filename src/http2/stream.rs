@@ -1,8 +1,12 @@
+use std::sync::{Arc, Mutex};
+
 use bytes::{Bytes, BytesMut};
 
 use crate::http::{HTTPRequest, HeaderVal, HeadersMap};
 
+use super::connection::{SettingsMap, SettingsIdentifier};
 use super::frames::{ContinuationFlags, DataFlags, ErrorCode, Frame, FrameBody, HeadersFlags};
+use super::window::Window;
 
 use hpack::Decoder;
 use hpack::Encoder;
@@ -239,6 +243,8 @@ pub struct Stream {
     pub id: u32,
     pub state: StreamState,
     req_assembler: ReqAssembler,
+    window: Window, 
+    peer_settings: Arc<Mutex<SettingsMap>>,
 }
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum StreamState {
@@ -261,11 +267,14 @@ impl StreamState {
 
 
 impl Stream {
-    pub fn new(id: u32) -> Stream {
+    pub fn new(id: u32, peer_settings: Arc<Mutex<SettingsMap>>) -> Stream {
+        let initial_window_size = peer_settings.lock().unwrap().get(SettingsIdentifier::InitialWindowSize).unwrap();
         Stream {
             id,
             state: StreamState::Idle,
-            req_assembler: ReqAssembler::new()
+            req_assembler: ReqAssembler::new(),
+            peer_settings,
+            window: Window::new(initial_window_size as i64)
         }
     }
 
@@ -441,6 +450,18 @@ impl Stream {
         };
 
         self.state = new_state;
+    }
+
+    pub fn push_data(&mut self, data: Bytes) {
+        self.window.push_data(data);
+    }
+
+    pub fn get_ready_data_frames(&mut self) -> Option<Vec<Frame>> {
+        self.window.make_data_frames(self.peer_settings.lock().unwrap().get(SettingsIdentifier::MaxFrameSize).unwrap() as usize, self.id)
+    }
+
+    pub fn window_update(&mut self, increment: i64) -> Result<bool, ()> {
+        self.window.window_update(increment)
     }
 }
 

@@ -149,8 +149,7 @@ impl FrameBody {
         }
     }
 
-    /// Errors if hdr_block_frag failed to compress
-    fn size(&self) -> usize {
+    pub fn size(&self) -> usize {
         match self {
             Self::Data { pad_length, data } => {
                 data.len() + pad_length.map_or(0, |n| n + 1)
