@@ -16,7 +16,7 @@ pub mod http;
 pub mod http2;
 pub mod tls;
 
-use http::{HeaderVal, ResponseStatus};
+use http::{ResponseStatus};
 
 type ResponseQueue = VecDeque<JoinHandle<String>>;
 
@@ -117,19 +117,32 @@ fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerS
 }
 
 fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
-    let (_status, file_name) = match (req.method.as_str(), req.path.as_str()) {
-        ("GET", "/") => (ResponseStatus::Ok, "index.html"),
+    let (status, file_name) = match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/") => (ResponseStatus::Ok, String::from("index.html")),
         (_, "/slow") => {
             // Simulate long processing time
             thread::sleep(Duration::from_secs(10));
-            (ResponseStatus::Ok, "index.html")
-        }
-        _ => (ResponseStatus::NotFound, "404.html"),
+            (ResponseStatus::Ok, String::from("index.html"))
+        },
+        ("GET", path) => {
+            (ResponseStatus::Ok, String::from(path))
+        },
+        _ => (ResponseStatus::NotFound, String::from("404.html")),
     };
 
-    let contents = fs::read(format!("static/{file_name}")).unwrap();
-    let content_length = contents.len();
+    
     let mut response = http::HTTPResponse::default();
+    response.status = status;
+
+    let contents = match fs::read(format!("static/{file_name}")) {
+        Ok(content) => content,
+        Err(_) => {
+            response.status = ResponseStatus::NotFound;
+            vec![]
+        }
+    };
+    let content_length = contents.len();
+    
 
     response.set_multiple(HashMap::from([
         ("access-control-allow-origin", "*"),

@@ -2,13 +2,13 @@ use ::num_enum::{IntoPrimitive, TryFromPrimitive};
 use bytes::{Bytes, BytesMut};
 
 use crate::{
-    http::{hdr_map_size, HTTPRequest, HTTPResponse, HeaderVal, ReqHandlerFn},
+    http::{hdr_map_size, HTTPRequest, HTTPResponse, ReqHandlerFn},
     http2::{stream::{StreamState, ReqAssemblerState}, frames::{self, PingFlags, error::{DeserializationError, BodyDeserializationError, HeaderDeserializationError}}},
 };
 
 use super::{
     frames::{
-        ContinuationFlags, DataFlags, ErrorCode, Frame, FrameBody, HeadersFlags, SettingParam,
+        ContinuationFlags, ErrorCode, Frame, FrameBody, HeadersFlags, SettingParam,
         SettingsFlags,
     },
     stream::{compress_header, Stream},
@@ -533,9 +533,8 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                                         }
                                     },
                                     Err(_) => {
-                                        println!("Closing connection {} because window size overflow.", connection.id);
-                                        connection.close_with_error(ErrorCode::FlowControlError, frame.header.stream_id, queue_tx.clone());
-                                        break;
+                                        println!("Closing stream {} because window size overflow.", stream.id);
+                                        queue_tx.push(Frame::new(stream.id, 0, FrameBody::RstStream { error_code: ErrorCode::FlowControlError }))
                                     }
                                 }
                             },
@@ -658,6 +657,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         let (tx, rx) = mpsc::channel();
         let queue_tx = ResponseQueueTx::new(tx);
         let queue_rx = ResponseQueueRx::new(rx);
+        let id = self.id;
 
         let connection = Arc::new(self);
         let connection_cp = connection.clone();
@@ -667,7 +667,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         rx_handle.join().unwrap();
         tx_handle.join().unwrap();
 
-        println!("Connection Ended");
+        println!("Connection {id} Ended");
         None
     }
 }
