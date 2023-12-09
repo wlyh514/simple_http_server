@@ -1,7 +1,11 @@
+use rustls::{
+    server::{Accepted, Acceptor},
+    ServerConfig, ServerConnection,
+};
 use std::{
-    collections::{VecDeque, HashMap},
+    collections::{HashMap, VecDeque},
     fs,
-    io::{prelude::*, BufReader},
+    io::{prelude::*, BufReader, Error},
     net::{TcpListener, TcpStream},
     sync::{
         mpsc::{self, Receiver, Sender},
@@ -16,7 +20,9 @@ pub mod http;
 pub mod http2;
 pub mod tls;
 
-use http::{ResponseStatus};
+use http::ResponseStatus;
+
+use tls::choose_tls_config;
 
 type ResponseQueue = VecDeque<JoinHandle<String>>;
 
@@ -123,14 +129,11 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
             // Simulate long processing time
             thread::sleep(Duration::from_secs(10));
             (ResponseStatus::Ok, String::from("index.html"))
-        },
-        ("GET", path) => {
-            (ResponseStatus::Ok, String::from(path))
-        },
+        }
+        ("GET", path) => (ResponseStatus::Ok, String::from(path)),
         _ => (ResponseStatus::NotFound, String::from("404.html")),
     };
 
-    
     let mut response = http::HTTPResponse::default();
     response.status = status;
 
@@ -142,12 +145,11 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
         }
     };
     let content_length = contents.len();
-    
 
     response.set_multiple(HashMap::from([
         ("access-control-allow-origin", "*"),
         ("content-type", "text/html"),
-        ("content-length", &format!("{content_length}"))
+        ("content-length", &format!("{content_length}")),
     ]));
 
     response.body = Some(contents.into());
@@ -158,15 +160,30 @@ fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse {
 fn main() {
     let host: &str = "localhost:7878";
     let listener: TcpListener = TcpListener::bind(host).unwrap();
-    let tls_config: Arc<rustls::ServerConfig> = tls::config_tls();
-
     let h2_server: http2::server::Server<fn(http::HTTPRequest) -> http::HTTPResponse> =
         http2::server::Server::new(request_handler);
 
     println!("Server started on {host}");
 
+    // Start a TLS server that waits for incoming connections.
     for stream in listener.incoming() {
-        let stream: TcpStream = stream.unwrap();
+        let mut stream: TcpStream = stream.unwrap();
+        let mut acceptor: Acceptor = Acceptor::default();
+
+        // Read TLS packets until a full ClientHello is consumed. This signals the
+        // server that it is ready to accept a connection.
+        let accepted: Accepted = loop {
+            acceptor.read_tls(&mut stream).unwrap();
+            if let Some(accepted) = acceptor.accept().unwrap() {
+                break accepted;
+            }
+        };
+
+        // Choose a TLS configuration for the accepted connection which may be
+        // modified by the ClientHello.
+        let tls_config: Arc<ServerConfig> = choose_tls_config(accepted.client_hello());
+        let mut connection: ServerConnection = accepted.into_connection(tls_config).unwrap();
+        let test: Result<(usize, usize), Error> = connection.complete_io(&mut stream);
 
         h2_server.handle_connection(stream);
     }

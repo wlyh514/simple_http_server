@@ -1,4 +1,4 @@
-use rustls::ServerConfig;
+use rustls::{server::ClientHello, ServerConfig};
 use rustls_pemfile;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use std::{fs, io::BufReader, sync::Arc};
@@ -37,7 +37,7 @@ fn load_private_key(filename: &str) -> PrivateKeyDer<'static> {
 }
 
 /// Configure TLS server by setting up certificates and private key.
-pub fn config_tls() -> Arc<ServerConfig> {
+fn config_tls() -> Arc<ServerConfig> {
     let certificates: Vec<_> = load_certificates("certificates/cert.pem");
     let private_key = load_private_key("certificates/decrypted_key.pem");
 
@@ -47,4 +47,9 @@ pub fn config_tls() -> Arc<ServerConfig> {
         .expect("Bad certificate(s) or private key.");
 
     Arc::new(config)
+}
+
+/// Choose TLS server config based on ClientHello message.
+pub fn choose_tls_config(_client_hello: ClientHello) -> Arc<ServerConfig> {
+    config_tls()
 }
