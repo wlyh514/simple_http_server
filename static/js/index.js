@@ -1,22 +1,26 @@
 class Showcase {
 
-  latencyDurations = [5, 4, 3, 2, 1];
-
   rootId;
   rootUrl;
+  requestFn;
 
-  
-
-  constructor(rootId, rootUrl) {
+  constructor(rootId, rootUrl, requestFn) {
     this.rootId = rootId;
     this.rootUrl = rootUrl;
+    this.requestFn = requestFn;
 
+    this.load();
     this.registerListeners();
     this.render();
   }
 
   load() {
-
+    window.addEventListener("DOMContentLoaded", () => {
+      console.log(`#${this.rootId}`);
+      document
+        .querySelector(`#${this.rootId}`)
+        .innerHTML = "<b>If you see this paragraph, page js is loaded successfully. </b>";
+    })
   }
 
   render() {
@@ -28,9 +32,6 @@ class Showcase {
   }
 
   async startShowcase() {
-    for (const duration of this.latencyDurations) {
-      fetch(`${this.rootUrl}/slow/`)
-    }
-    
+
   }
 }

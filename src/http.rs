@@ -111,6 +111,7 @@ impl HTTPResponse {
                 self.status(ResponseStatus::Ok);
             }
             Err(_) => {
+                self.file("static/404.html");
                 self.status(ResponseStatus::NotFound);
             }
         };

@@ -19,6 +19,7 @@ fn request_handler(req: http::HTTPRequest, res: &mut http::HTTPResponse) {
         (_, "/slow") => {
             // Simulate long processing time
             thread::sleep(Duration::from_secs(10));
+            res.text(String::from("Resouce loaded after a while. "));
         }
         ("GET", "/ping") => {
             res.text(format!("{:#?}", req.headers));
