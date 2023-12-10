@@ -1,7 +1,7 @@
-use std::{io::{BufReader, Read, Write}, sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex}, net::TcpStream};
-use ::std::thread;
+use std::{io::{BufReader, Read, Write}, sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex, mpsc}, net::TcpStream};
+use ::std::{thread, time};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use rustls::ServerConnection;
 
 use crate::{http::ReqHandlerFn, http2::{frames::SettingsFlags, connection::{SettingsIdentifier, self}}};
@@ -9,6 +9,42 @@ use crate::{http::ReqHandlerFn, http2::{frames::SettingsFlags, connection::{Sett
 use super::{connection::{Connection, SettingsMap}, frames::{Frame, FrameBody}};
 
 pub type TlsStream<'a> = rustls::Stream<'a, ServerConnection, TcpStream>;
+pub fn tls_read_exact_timeout(tls: &mut TlsStream, mut buf: &mut [u8], size: usize, timeout: time::Duration) -> Option<Result<usize, ()>> {
+    let (timer_tx, timer_rx) = mpsc::channel();
+    thread::spawn(move || {
+        thread::sleep(timeout);
+        let _ = timer_tx.send(());
+    });
+
+    let mut bytes_read = 0;
+    let mut byte: [u8; 1] = [0];
+    while bytes_read < size {
+        match timer_rx.try_recv() {
+            Ok(_) => {
+                if bytes_read == 0 {
+                    return None
+                }
+                if bytes_read != size {
+                    return Some(Err(()))
+                }
+            }
+            Err(_) => {}
+        };
+        let result = tls.read(&mut byte);
+        match result {
+            Ok(size) => {
+                if size == 1 {
+                    if let Err(_) = buf.write(&byte) {
+                        return Some(Err(()));
+                    }
+                    bytes_read += 1;
+                }
+            }, 
+            Err(_) => return Some(Err(())),
+        }
+    };
+    Some(Ok(bytes_read))
+}
 // pub struct TlsStream {
 //     connection: ServerConnection, 
 //     tcp_stream: TcpStream, 

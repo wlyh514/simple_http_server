@@ -1,11 +1,13 @@
-use std::{io::Read, sync::{Arc, Mutex}};
+use std::{io::Read, sync::{Arc, Mutex}, time::Duration};
 use ::std::{io::BufReader, net::TcpStream};
 
 use ::bitflags::bitflags;
 use ::bytes::{BufMut, Bytes, BytesMut, Buf};
 use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
-use super::{connection::SettingsIdentifier, server::TlsStream};
+use self::error::DeserializationError;
+
+use super::{connection::SettingsIdentifier, server::{TlsStream, tls_read_exact_timeout}};
 
 bitflags! {
     pub struct DataFlags: u8 {
@@ -448,18 +450,36 @@ impl Frame {
         // let mut buf_reader = buf_reader.lock().unwrap();
         let mut header_buf = BytesMut::zeroed(9);
         // Read frame header
-        buf_reader.read_exact(header_buf.as_mut()).map_err(|_| error::DeserializationError::BufReaderError)?;
+        
+        println!("Try reading header");
+        match tls_read_exact_timeout(buf_reader, header_buf.as_mut(), 9, Duration::from_millis(20)) {
+            Some(Err(_)) => return Err(DeserializationError::BufReaderError),
+            None => return Err(DeserializationError::Timeout),
+            _ => {}
+        };
+        println!("Header read");
+        
         let header_buf: Bytes = Bytes::copy_from_slice(&header_buf);
         
         let header = FrameHeader::try_from(header_buf)
             .map_err(|err| error::DeserializationError::Header(err))?;
 
+        
+
+        println!("Try reading payload");
         let mut payload_buf: Vec<u8> = vec![0; header.length];
-        buf_reader.read_exact(payload_buf.as_mut_slice()).map_err(|_| error::DeserializationError::BufReaderError)?;
+        match tls_read_exact_timeout(buf_reader, payload_buf.as_mut(), header.length, Duration::from_millis(40)) {
+            Some(Err(_)) | None => return Err(DeserializationError::BufReaderError),
+            _ => {}
+        };
+
+        // buf_reader.read_exact(payload_buf.as_mut_slice()).map_err(|_| error::DeserializationError::BufReaderError)?;
         let payload_buf: Bytes = payload_buf.into();
         
         let payload = FrameBody::try_from_buf(payload_buf, &header)
             .map_err(|err| error::DeserializationError::Body(err))?;
+        
+        println!("Payload read");
 
         Ok(Self { header, payload })
     }
@@ -513,5 +533,6 @@ pub mod error {
         Header(HeaderDeserializationError),
         Body(BodyDeserializationError),
         BufReaderError,
+        Timeout,
     }
 }

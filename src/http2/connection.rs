@@ -60,6 +60,17 @@ impl ResponseQueueTx {
     }
 }
 
+fn is_data_available(stream: &TcpStream) -> bool {
+    stream.set_nonblocking(true).unwrap();
+    let mut buf = [0u8; 8];
+    let result = stream.peek(&mut buf);
+    stream.set_nonblocking(false).unwrap();
+    match result {
+        Ok(size) => size > 0,
+        Err(_) => false
+    }
+}
+
 #[derive(Clone)]
 pub struct Connection<T: ReqHandlerFn + Copy> {
     server_settings: Arc<Mutex<SettingsMap>>, 
@@ -222,7 +233,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         }
         
         let frame_bytes: Bytes = frame.try_into().map_err(|_| ())?;
-        println!("tx try to acquire lock");
+        // println!("tx try to acquire lock");
         // let mut tls_stream = loop {
         //     if let Ok(s) = tls_stream.try_lock() {
         //         if s.conn.wants_write() {
@@ -233,7 +244,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         //     }
         // };
         // let mut tls_stream = tls_stream.lock().unwrap();
-        println!("tx acquired lock");
+        // println!("tx acquired lock");
         tls_stream.write_all(frame_bytes.as_ref()).map_err(|_| ())?;
         tls_stream.flush().map_err(|_| ())?;
 
@@ -241,7 +252,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
     }
 
     fn handle_request(&self, req: HTTPRequest, stream_id: u32, queue_tx: ResponseQueueTx) {
-        println!("Handling request.");
         let mut resp = (self.handler)(req);
         match self.make_header_frames(stream_id, &mut resp) {
             Ok(frames) => {
@@ -414,8 +424,11 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         loop {
             let mut unknown_frame = false;
             let frame: Frame;
+            if is_data_available(&tls_stream.sock)
+            {
             {
                 // let mut tls_stream = tls_stream.lock().unwrap();
+                println!("Trying to read frame from buf");
                 frame = match Frame::try_read_from_buf(&mut tls_stream) {
                     Ok(frame) => frame,
                     Err(DeserializationError::Header(HeaderDeserializationError::UnknownFrameType(_)))  => {
@@ -429,10 +442,16 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     Err(DeserializationError::Body(BodyDeserializationError::UnknownErrorCode(_))) => {
                         let zeroed_data: Bytes = BytesMut::zeroed(8).into();
                         Frame::new(0, 0, FrameBody::Ping { data: zeroed_data })
-                    }
+                    },
+                    Err(DeserializationError::Timeout) => {
+                        println!("Try to read from queue");
+                        continue;
+                    }, 
                     Err(err) => {
                         match err {
-                            frames::error::DeserializationError::BufReaderError => break,
+                            frames::error::DeserializationError::BufReaderError => {
+                                println!("Closing connection because buf reader error");
+                            },
                             _ => {
                                 println!("Closing connection because error occured during frame deserialization: {:#?}", err);
                                 connection.close_with_error(ErrorCode::ProtocolError, 0, queue_tx.clone());
@@ -442,6 +461,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                         break;
                     }
                 };
+                println!("frame read");
             }
             
             dbg!(connection.id, "recv", &frame);
@@ -630,15 +650,16 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     println!("Stream {} closed. ", stream.id);
                     // connection.streams.lock().unwrap().remove(&stream.id);
                 }
+                println!("End of loop");
             }
-
+            }
             match queue_rx.try_pop() {
                 Ok(Some(frame)) => {
-                    let _ = connection.send_frame(frame, &mut tls_stream);
+                    let _ = connection.send_frame(frame, &mut tls_stream).unwrap();
                 },
                 Err(_) => break,
                 _ => {},
-            }
+            };
         }
     }
 
@@ -703,13 +724,15 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
         // let rx_handle = thread::spawn(move || Self::run_rx(connection, queue_tx, tls_stream_rx));
         // let tx_handle = thread::spawn(move || Self::run_tx(connection_cp, queue_rx, tls_stream_tx));
 
-        thread::scope(|s| {
-            let rx_handle = s.spawn(|| Self::run_rx(connection, queue_tx, queue_rx, tls_stream));
-            // let tx_handle = s.spawn(|| Self::run_tx(connection_cp, queue_rx, tls_stream_tx));
-            rx_handle.join().unwrap();
-            // tx_handle.join().unwrap();
-            println!("Connection {id} Ended");
-        });
+        // thread::scope(|s| {
+        //     let rx_handle = s.spawn(|| Self::run_rx(connection, queue_tx, queue_rx, tls_stream));
+        //     // let tx_handle = s.spawn(|| Self::run_tx(connection_cp, queue_rx, tls_stream_tx));
+        //     rx_handle.join().unwrap();
+        //     // tx_handle.join().unwrap();
+        //     println!("Connection {id} Ended");
+        // });
+        Self::run_rx(connection, queue_tx, queue_rx, tls_stream);
+        println!("Connection {id} Ended");
         None
     }
 }

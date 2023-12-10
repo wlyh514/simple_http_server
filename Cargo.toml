@@ -9,7 +9,7 @@ edition = "2021"
 bytes = "1.0"
 hpack = "0.3.0"
 num_enum = "0.7.1"
-rustls = "0.22.0"
+rustls = { version = "0.22.0" }
 rustls-pemfile = "2.0.0"
 rustls-pki-types = "1.0.1"
 [dependencies.bitflags]
