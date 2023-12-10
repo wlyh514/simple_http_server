@@ -8,6 +8,9 @@
 
 I worked on creating helper functions for compressing and decompressing headers using the HPACK algorithm, along with the relevant unit tests. I also contributed in our attemp to integrate TLS by creating a server certificate configuration and allowing the server to detect and respond to a client TLS handshake.
 
+### Ali Abdoli
+I worked on creating a simpler API for interacting with the response object. Allowing reponse.set similar to the node express implementation.
+
 ## How to Run and Test the Project
 
 ## Implementation Details
