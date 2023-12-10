@@ -159,7 +159,7 @@ impl ReqAssembler {
 
                 let body: Option<Bytes> = match self.body.len() {
                     0 => None,
-                    _ => Some(self.body.clone().into()),
+                    _ => Some(self.body.split_off(0).into()),
                 };
                 let trailers: Option<HeadersMap> = match self.trailer_block.len() {
                     0 => None,
@@ -204,7 +204,7 @@ impl ReqAssembler {
                     match content_length {
                         HeaderVal::Single(content_length) => {
                             let content_length: usize = content_length.parse().map_err(|_| ErrorCode::ProtocolError)?;
-                            if content_length != self.body.len() {
+                            if content_length != match &body { None => 0, Some(b) => b.len() } {
                                 return Err(ErrorCode::ProtocolError);
                             }
                         }, 

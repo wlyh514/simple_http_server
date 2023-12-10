@@ -1,6 +1,6 @@
 use rustls::{
     server::{Accepted, Acceptor},
-    ServerConfig, ServerConnection,
+    ServerConfig, ServerConnection, Stream,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -13,7 +13,7 @@ use std::{
     },
     thread::{self, JoinHandle},
     time::Duration,
-    vec,
+    vec, borrow::BorrowMut,
 };
 
 pub mod http;
@@ -183,8 +183,8 @@ fn main() {
         // modified by the ClientHello.
         let tls_config: Arc<ServerConfig> = choose_tls_config(accepted.client_hello());
         let mut connection: ServerConnection = accepted.into_connection(tls_config).unwrap();
-        let test: Result<(usize, usize), Error> = connection.complete_io(&mut stream);
+        let _test: Result<(usize, usize), Error> = connection.complete_io(&mut stream);
 
-        h2_server.handle_connection(stream);
+        h2_server.handle_connection(connection, stream);
     }
 }

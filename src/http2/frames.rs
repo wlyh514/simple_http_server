@@ -1,11 +1,11 @@
-use std::io::Read;
+use std::{io::Read, sync::{Arc, Mutex}};
 use ::std::{io::BufReader, net::TcpStream};
 
 use ::bitflags::bitflags;
 use ::bytes::{BufMut, Bytes, BytesMut, Buf};
 use ::num_enum::{TryFromPrimitive, IntoPrimitive};
 
-use super::connection::SettingsIdentifier;
+use super::{connection::SettingsIdentifier, server::TlsStream};
 
 bitflags! {
     pub struct DataFlags: u8 {
@@ -444,7 +444,8 @@ impl Frame {
     }
 
     /// Deserialization
-    pub fn try_read_from_buf(buf_reader: &mut BufReader<TcpStream>) -> Result<Frame, error::DeserializationError> {
+    pub fn try_read_from_buf(buf_reader: &mut TlsStream) -> Result<Frame, error::DeserializationError> {
+        // let mut buf_reader = buf_reader.lock().unwrap();
         let mut header_buf = BytesMut::zeroed(9);
         // Read frame header
         buf_reader.read_exact(header_buf.as_mut()).map_err(|_| error::DeserializationError::BufReaderError)?;
