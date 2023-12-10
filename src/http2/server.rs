@@ -48,7 +48,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
 
         let mut preface_starter = [0; 24];
         tcp_reader.read_exact(&mut preface_starter).ok()?;
-        println!("Connection {connection_id} received0.5");
         let preface_starter = String::from_utf8(preface_starter.into()).ok()?;
         if preface_starter != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
             return None;
@@ -70,7 +69,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
             }
             Err(_) => return None,
         };
-        println!("Connection {connection_id} received1");
         let mut server_settings = SettingsMap::default();
         server_settings
             .set(SettingsIdentifier::EnablePush, 0)
