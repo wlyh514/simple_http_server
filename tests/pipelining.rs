@@ -41,7 +41,8 @@ mod tests {
         let (signal_tx, signal_rx) = mpsc::channel::<RespListenerSignal>();
 
         let stream_cp = stream.try_clone().unwrap();
-        let resp_listener_handler = thread::spawn(move || listen_to_response(stream_cp, signal_tx));
+        let _resp_listener_handler =
+            thread::spawn(move || listen_to_response(stream_cp, signal_tx));
 
         const NUM_REQUESTS: u32 = 3;
 

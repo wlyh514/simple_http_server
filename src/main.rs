@@ -1,114 +1,68 @@
+use clap::Parser;
 use std::{
-    fs,
-    io::{prelude::*, BufReader},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex, mpsc::{self, Receiver, Sender}},
-    thread::{self, JoinHandle},
+    thread::{self},
     time::Duration,
-    vec, collections::VecDeque,
 };
 
-type ResponseQueue = VecDeque<JoinHandle<String>>;
+pub mod http;
+pub mod http1_1;
+pub mod http2;
 
-enum RespHandlerSignal {
-    NewResp, 
-    Finished,
-}
+use http::ResponseStatus;
 
-fn handle_connection(stream: TcpStream) {
-    let response_queue: Arc<Mutex<ResponseQueue>> = Arc::new(Mutex::new(VecDeque::new()));
-    
-    let (resp_signal_tx, resp_signal_rx) = mpsc::channel::<RespHandlerSignal>();
-    let response_queue_cp = response_queue.clone();
-    let stream_cp = stream.try_clone().unwrap();
-    thread::spawn(move || handle_response(response_queue_cp, stream_cp, resp_signal_rx));
-
-    let buf_reader = BufReader::<TcpStream>::new(stream);
-
-    let mut http_request: Vec<String> = vec![];
-    let _body = false;
-    for line in buf_reader.lines() {
-        let line = line.unwrap();
-
-        if line.is_empty() {
-            // TODO: handle the case of request with body
-            
-            // Wrap up this request, send to request handler
-            let http_request_cp = http_request.clone();
-            let resp_signal_tx_cp = resp_signal_tx.clone();
-            let handler = thread::spawn(move || handle_request(http_request_cp, resp_signal_tx_cp));
-            {
-                let mut response_queue = response_queue.lock().unwrap();
-                response_queue.push_back(handler);
-                println!("New handler pushed");
-            }
-            http_request.clear();
-        } else {
-            http_request.push(line);
+fn request_handler(req: http::HTTPRequest, res: &mut http::HTTPResponse) {
+    match (req.method.as_str(), req.path.as_str()) {
+        ("GET", "/") => {
+            res.file(&format!("static/index.html"));
         }
-    }
-    resp_signal_tx.send(RespHandlerSignal::Finished).unwrap();
-}
-
-fn handle_response(response_queue: Arc<Mutex<ResponseQueue>>, mut stream: TcpStream, resp_signal_rx: Receiver<RespHandlerSignal>) {
-    loop {
-        match resp_signal_rx.recv().unwrap() {
-            RespHandlerSignal::NewResp => {
-                let mut response_queue = response_queue.lock().unwrap();
-                while !response_queue.is_empty() {
-                    let handler = response_queue.pop_front().unwrap();
-                    thread::sleep(Duration::from_micros(1));
-                    if handler.is_finished() {
-                        let response = handler.join().unwrap();
-                        stream.write_all(response.as_bytes()).unwrap();
-                        println!("Response sent: {response}");
-                    } else {
-                        break;
-                    }
-                }
-            }, 
-            RespHandlerSignal::Finished => {
-                break;
-            }
-        }
-    }
-}
-
-fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerSignal>) -> String {
-    println!("Request: {:#?}", &http_request);
-    let request_line = http_request[0].clone();
-    let mut splited_request_line = request_line.split_whitespace();
-
-    let method = splited_request_line.next().unwrap();
-    let uri = splited_request_line.next().unwrap();
-    let _protocol = splited_request_line.next().unwrap();
-
-    let (status_line, file_name) = match (method, uri) {
-        ("GET", "/") => ("HTTP/1.1 200 OK", "index.html"),
         (_, "/slow") => {
             // Simulate long processing time
             thread::sleep(Duration::from_secs(10));
-            ("HTTP/1.1 200 OK", "index.html")
+            res.text(String::from("Resouce loaded after a while. "));
         }
-        _ => ("HTTP/1.1 404 NOT FOUND", "404.html"),
+        ("GET", "/ping") => {
+            res.text(format!("{:#?}", req.headers));
+        }
+        ("GET", path) => {
+            res.file(&format!("static/{path}"));
+        }
+        _ => {
+            res.status(ResponseStatus::NotFound);
+        }
     };
+}
 
-    let contents = fs::read_to_string(format!("static/{file_name}")).unwrap();
-    let content_length = contents.len();
-    let response = format!("{status_line}\r\nContent-Length: {content_length}\r\n\r\n{contents}\r\n");
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Run HTTP/1.1 pipelining server.
+    #[arg(long, default_value_t = false)]
+    http1: bool,
 
-    resp_signal_tx.send(RespHandlerSignal::NewResp).unwrap();
-    return response;
+    /// Run HTTP/2 multiplexing server. This is the default behaviour.
+    #[arg(long, default_value_t = true)]
+    http2: bool,
 }
 
 fn main() {
-    let listener = TcpListener::bind("localhost:7878").unwrap();
+    let host: &str = "localhost:7878";
+    let listener: TcpListener = TcpListener::bind(host).unwrap();
+    let h2_server = http2::Server::new(request_handler);
+    let h1_server = http1_1::Server::new(request_handler);
 
-    println!("Server started");
+    let args = Args::parse();
+    let protocol = if args.http1 { "HTTP/1.1" } else { "HTTP/2" };
+    println!("{protocol} Server started on {host}");
 
+    // Start a TLS server that waits for incoming connections.
     for stream in listener.incoming() {
-        let stream = stream.unwrap();
-
-        handle_connection(stream);
+        let stream: TcpStream = stream.unwrap();
+        println!("new connection in main");
+        if args.http1 {
+            h1_server.handle_connection(stream);
+        } else {
+            h2_server.handle_connection(stream);
+        }
     }
 }
