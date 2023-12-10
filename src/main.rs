@@ -18,11 +18,8 @@ use std::{
 
 pub mod http;
 pub mod http2;
-pub mod tls;
 
 use http::ResponseStatus;
-
-use tls::choose_tls_config;
 
 type ResponseQueue = VecDeque<JoinHandle<String>>;
 
@@ -167,23 +164,7 @@ fn main() {
 
     // Start a TLS server that waits for incoming connections.
     for stream in listener.incoming() {
-        let mut stream: TcpStream = stream.unwrap();
-        let mut acceptor: Acceptor = Acceptor::default();
-
-        // Read TLS packets until a full ClientHello is consumed. This signals the
-        // server that it is ready to accept a connection.
-        let accepted: Accepted = loop {
-            acceptor.read_tls(&mut stream).unwrap();
-            if let Some(accepted) = acceptor.accept().unwrap() {
-                break accepted;
-            }
-        };
-
-        // Choose a TLS configuration for the accepted connection which may be
-        // modified by the ClientHello.
-        let tls_config: Arc<ServerConfig> = choose_tls_config(accepted.client_hello());
-        let mut connection: ServerConnection = accepted.into_connection(tls_config).unwrap();
-        let test: Result<(usize, usize), Error> = connection.complete_io(&mut stream);
+        let stream: TcpStream = stream.unwrap();
 
         h2_server.handle_connection(stream);
     }
