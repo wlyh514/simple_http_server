@@ -1,16 +1,16 @@
+use super::frames::{DataFlags, Frame, FrameBody};
 use bytes::Bytes;
-use super::frames::{Frame, FrameBody, DataFlags};
 
 pub struct Window {
     data_buffer: Option<Bytes>,
-    available_size: i64
+    available_size: i64,
 }
 
 impl Window {
     pub fn new(size: i64) -> Window {
         Window {
             data_buffer: None,
-            available_size: size
+            available_size: size,
         }
     }
 
@@ -31,8 +31,12 @@ impl Window {
             Ok(())
         }
     }
-    
-    pub fn make_data_frames(&mut self, max_frame_size: usize, stream_id: u32) -> Option<Vec<Frame>> {
+
+    pub fn make_data_frames(
+        &mut self,
+        max_frame_size: usize,
+        stream_id: u32,
+    ) -> Option<Vec<Frame>> {
         if self.available_size <= 0 {
             return None;
         }
@@ -41,7 +45,7 @@ impl Window {
                 let mut frames = Vec::new();
 
                 let mut remaining_bytes = usize::min(data.len(), self.available_size as usize);
-                while remaining_bytes > 0  {
+                while remaining_bytes > 0 {
                     let bytes_taken = usize::min(remaining_bytes, max_frame_size);
 
                     let mut flags = DataFlags::from_bits_retain(0);
@@ -68,7 +72,7 @@ impl Window {
 
                 Some(frames)
             }
-            None => None
+            None => None,
         }
     }
 }

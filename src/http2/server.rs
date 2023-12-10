@@ -1,12 +1,18 @@
-use std::{io::{BufReader, Read, Write, BufWriter}, sync::atomic::{AtomicUsize, Ordering}};
 use ::std::{net::TcpStream, thread};
+use std::{
+    io::{BufReader, BufWriter, Read, Write},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use bytes::Bytes;
 
-use crate::{http::ReqHandlerFn, http2::{frames::SettingsFlags, connection::SettingsIdentifier}};
+use crate::http::ReqHandlerFn;
 
-use super::{connection::{Connection, SettingsMap}, frames::{Frame, FrameBody}};
-
+use super::{
+    connection::Connection,
+    frames::{Frame, FrameBody, SettingsFlags},
+    settings::{SettingsIdentifier, SettingsMap},
+};
 
 pub struct Server<T: ReqHandlerFn + Copy + 'static> {
     handler: T,
@@ -15,7 +21,10 @@ pub struct Server<T: ReqHandlerFn + Copy + 'static> {
 
 impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
     pub fn new(handler: T) -> Self {
-        Self { handler, connection_count: AtomicUsize::new(0) }
+        Self {
+            handler,
+            connection_count: AtomicUsize::new(0),
+        }
     }
 
     pub fn handle_connection(&self, stream: TcpStream) {
@@ -24,7 +33,9 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
         let connection_count = self.connection_count.fetch_add(1, Ordering::SeqCst);
         let handler_cp = self.handler;
 
-        thread::spawn(move || Server::<T>::_handle_connection(connection_count, stream, handler_cp));
+        thread::spawn(move || {
+            Server::<T>::_handle_connection(connection_count, stream, handler_cp)
+        });
     }
 
     fn _handle_connection(connection_id: usize, stream: TcpStream, handler: T) -> Option<()> {
@@ -40,7 +51,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
         println!("Connection {connection_id} received0.5");
         let preface_starter = String::from_utf8(preface_starter.into()).ok()?;
         if preface_starter != "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" {
-            return None
+            return None;
         }
 
         let settings = match Frame::try_read_from_buf(&mut tcp_reader) {
@@ -48,25 +59,26 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
                 match frame.is_valid() {
                     Err(err) => {
                         println!("{err}");
-                        return None
-                    },
+                        return None;
+                    }
                     _ => {}
                 }
                 match frame.payload {
                     FrameBody::Settings(settings) => settings,
-                    _ => { return None }
+                    _ => return None,
                 }
-            },
-            Err(_) => {
-                return None
             }
+            Err(_) => return None,
         };
         println!("Connection {connection_id} received1");
         let mut server_settings = SettingsMap::default();
-        server_settings.set(SettingsIdentifier::EnablePush, 0).ok()?;   // Since curl does not support server pushing
+        server_settings
+            .set(SettingsIdentifier::EnablePush, 0)
+            .ok()?; // Since curl does not support server pushing
 
         // Send server preface
-        let server_preface_frame = Frame::new(0, 0, FrameBody::Settings(server_settings.clone().into()));
+        let server_preface_frame =
+            Frame::new(0, 0, FrameBody::Settings(server_settings.clone().into()));
         let server_preface_bytes: Bytes = server_preface_frame.try_into().ok()?;
         tcp_writer.write_all(server_preface_bytes.as_ref()).ok()?;
         tcp_writer.flush().unwrap();
@@ -77,24 +89,12 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
         tcp_writer.write_all(ack_frame_bytes.as_ref()).ok()?;
 
         tcp_writer.flush().unwrap();
-        
+
         // Create connection struct
-        let connection: Connection<T> = Connection::new(handler, server_settings, settings, connection_id);
+        let connection: Connection<T> =
+            Connection::new(handler, server_settings, settings, connection_id);
         println!("Connection {connection_id} Established");
         connection.run(tcp_reader, tcp_writer);
         None
-    }
-}
-
-mod test {
-    use crate::http::{HTTPRequest, HTTPResponse};
-    use super::Server;
-
-    fn _sample_handler(_: HTTPRequest) -> HTTPResponse {
-        HTTPResponse::default()
-    }
-
-    fn _test_traits() {
-        let _server = Server::new(_sample_handler);
     }
 }

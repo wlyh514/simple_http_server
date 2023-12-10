@@ -3,9 +3,21 @@
   <head>
     <meta charset="utf-8">
     <title>Simple HTTP Server</title>
+    <script src="js/multiplexing.js"></script>
+    <link rel="stylesheet" href="./css/index.css">
   </head>
   <body>
     <h1>Hello!</h1>
     <p>This is a simple HTTP server. </p>
+
+    <h2>HTTP/1.1 Pipelining vs. HTTP/2 Multiplexing</h2>
+    <p>HTTP/1.1 pipelining and HTTP/2 multiplexing are ways of sending multiple requests over a single TCP connection. </p>
+
+    <div id="multiplexing-showcase"></div>
+
+    <script>
+      const multiplexing = new Multiplexing("multiplexing-showcase", "http://127.0.0.1:7878");
+      multiplexing.load();
+    </script>
   </body>
 </html>

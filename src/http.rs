@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use std::mem;
+use std::{collections::HashMap, fs};
 
 use bytes::{Bytes, BytesMut};
 
@@ -38,9 +38,7 @@ impl HeaderVal {
         let mut bytes = BytesMut::new();
         match self {
             Self::Single(val) => bytes.extend_from_slice(val.as_bytes()),
-            Self::Multiple(vals) => {
-                bytes.extend_from_slice(vals.join(",").as_bytes())
-            }
+            Self::Multiple(vals) => bytes.extend_from_slice(vals.join(",").as_bytes()),
         }
         bytes.into()
     }
@@ -48,8 +46,8 @@ impl HeaderVal {
 
 pub type HeadersMap = HashMap<String, HeaderVal>;
 
-pub trait ReqHandlerFn: Fn(HTTPRequest) -> HTTPResponse + Sync + Send {}
-impl<F: Fn(HTTPRequest) -> HTTPResponse + Sync + Send> ReqHandlerFn for F {}
+pub trait ReqHandlerFn: Fn(HTTPRequest, &mut HTTPResponse) -> () + Sync + Send {}
+impl<F: Fn(HTTPRequest, &mut HTTPResponse) -> () + Sync + Send> ReqHandlerFn for F {}
 
 #[derive(Debug)]
 pub struct HTTPRequest {
@@ -85,21 +83,51 @@ pub struct HTTPResponse {
 impl HTTPResponse {
     pub fn default() -> Self {
         // Testing purposes only
-        Self {
+        let mut resp = Self {
             status: ResponseStatus::Ok,
             headers: HeadersMap::new(),
             body: None,
             trailers: None,
-        }
+        };
+        resp.set("Content-Length", "0");
+        resp
     }
     pub fn set(&mut self, field: &str, value: &str) {
-        self.headers.insert(field.into(), HeaderVal::Single(value.into()));
+        self.headers
+            .insert(field.into(), HeaderVal::Single(value.into()));
     }
 
     pub fn set_multiple(&mut self, values: HashMap<&str, &str>) {
         for (field, value) in values {
-            self.headers.insert(field.into(), HeaderVal::Single(value.into()));
+            self.headers
+                .insert(field.into(), HeaderVal::Single(value.into()));
         }
+    }
+
+    pub fn file(&mut self, fp: &str) {
+        match fs::read(fp) {
+            Ok(content) => {
+                self.bytes(Bytes::from(content));
+                self.status(ResponseStatus::Ok);
+            }
+            Err(_) => {
+                self.status(ResponseStatus::NotFound);
+            }
+        };
+    }
+
+    pub fn status(&mut self, status: ResponseStatus) {
+        self.status = status;
+    }
+
+    pub fn text(&mut self, text: String) {
+        self.bytes(Bytes::from(text));
+    }
+
+    pub fn bytes(&mut self, body: Bytes) {
+        let content_len = body.len();
+        self.body = Some(body);
+        self.set("Content-Length", &format!("{content_len}"));
     }
 }
 
@@ -161,9 +189,22 @@ pub enum ResponseStatus {
     HTTPVersionNotSupported = 505,
 }
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    fn actual_sizeof_val(val: &HeaderVal) -> usize {
+        match val {
+            HeaderVal::Single(val) => mem::size_of_val(val),
+            HeaderVal::Multiple(vals) => {
+                let mut size = 0;
+                for val in vals {
+                    size += mem::size_of_val(val);
+                }
+                size
+            }
+        }
+    }
     #[test]
     fn find_uncompressed_header_list_size_correctly() {
         let mut hdr_map: HashMap<String, HeaderVal> = HeadersMap::new();
@@ -202,23 +243,23 @@ mod tests {
         hdr_map.insert(header_name_9.clone(), header_value_9.clone());
 
         let actual_size = mem::size_of_val(&header_name_1)
-            + mem::size_of_val(&header_value_1)
+            + actual_sizeof_val(&header_value_1)
             + mem::size_of_val(&header_name_2)
-            + mem::size_of_val(&header_value_2)
+            + actual_sizeof_val(&header_value_2)
             + mem::size_of_val(&header_name_3)
-            + mem::size_of_val(&header_value_3)
+            + actual_sizeof_val(&header_value_3)
             + mem::size_of_val(&header_name_4)
-            + mem::size_of_val(&header_value_4)
+            + actual_sizeof_val(&header_value_4)
             + mem::size_of_val(&header_name_5)
-            + mem::size_of_val(&header_value_5)
+            + actual_sizeof_val(&header_value_5)
             + mem::size_of_val(&header_name_6)
-            + mem::size_of_val(&haader_value_6)
+            + actual_sizeof_val(&haader_value_6)
             + mem::size_of_val(&header_name_7)
-            + mem::size_of_val(&header_value_7)
+            + actual_sizeof_val(&header_value_7)
             + mem::size_of_val(&header_name_8)
-            + mem::size_of_val(&header_value_8)
+            + actual_sizeof_val(&header_value_8)
             + mem::size_of_val(&header_name_9)
-            + mem::size_of_val(&header_value_9)
+            + actual_sizeof_val(&header_value_9)
             + 32 * 9;
 
         assert_eq!(hdr_map_size(&hdr_map), actual_size);
