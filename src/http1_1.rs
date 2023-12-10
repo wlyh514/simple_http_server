@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     io::{prelude::*, BufReader, Write},
     net::TcpStream,
     sync::{
@@ -30,6 +30,12 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
     }
 
     pub fn handle_connection(&self, stream: TcpStream) {
+        println!("new connection");
+        let handler = self.handler;
+        thread::spawn(move || Server::<T>::_handle_connection(stream, handler));
+    }
+
+    fn _handle_connection(stream: TcpStream, handler: T) {
         let response_queue: Arc<Mutex<ResponseQueue>> = Arc::new(Mutex::new(VecDeque::new()));
 
         let (resp_signal_tx, resp_signal_rx) = mpsc::channel::<RespHandlerSignal>();
@@ -46,15 +52,15 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
                 Ok(l) => l,
                 Err(_) => break,
             };
+            println!("line read: {line}");
 
             if line.is_empty() {
                 // Wrap up this request, send to request handler
                 let resp_signal_tx_cp = resp_signal_tx.clone();
 
                 let req = deserialize_req(&http_request_lines);
-                let handler_fn = self.handler;
                 let handler = thread::spawn(move || {
-                    Server::<T>::handle_request(handler_fn, req, resp_signal_tx_cp)
+                    Server::<T>::handle_request(handler, req, resp_signal_tx_cp)
                 });
                 {
                     let mut response_queue = response_queue.lock().unwrap();
@@ -81,7 +87,7 @@ impl<T: ReqHandlerFn + Copy + 'static> Server<T> {
     }
 }
 
-/// Extracts request line only, since this is not the focus of this project.
+// Panics upon malformed requests, since this is not the focus of this project.
 fn deserialize_req(lines: &Vec<String>) -> HTTPRequest {
     let request_line = lines[0].clone();
     let mut splited_request_line = request_line.split_whitespace();
@@ -89,11 +95,20 @@ fn deserialize_req(lines: &Vec<String>) -> HTTPRequest {
     let path = splited_request_line.next().unwrap().to_string();
     let protocol = splited_request_line.next().unwrap().to_string();
 
+    let mut headers = HeadersMap::new();
+    for line in &lines[1..] {
+        let mut key = line.clone();
+        let val = key.split_off(line.find(":").unwrap());
+        let val = val[1..].trim();
+
+        headers.insert(key, HeaderVal::Single(String::from(val)));
+    }
+
     HTTPRequest {
         method,
         path,
         protocol,
-        headers: HashMap::new(),
+        headers,
         body: None,
         trailers: None,
     }

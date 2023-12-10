@@ -1,4 +1,7 @@
-use ::std::{io::{BufReader, Read}, net::TcpStream};
+use ::std::{
+    io::{BufReader, Read},
+    net::TcpStream,
+};
 
 use ::bitflags::bitflags;
 use ::bytes::{Buf, BufMut, Bytes, BytesMut};

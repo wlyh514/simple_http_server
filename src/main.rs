@@ -19,7 +19,9 @@ fn request_handler(req: http::HTTPRequest, res: &mut http::HTTPResponse) {
         (_, "/slow") => {
             // Simulate long processing time
             thread::sleep(Duration::from_secs(10));
-            res.status(ResponseStatus::Ok);
+        }
+        ("GET", "/ping") => {
+            res.text(format!("{:#?}", req.headers));
         }
         ("GET", path) => {
             res.file(&format!("static/{path}"));
@@ -45,17 +47,17 @@ struct Args {
 fn main() {
     let host: &str = "localhost:7878";
     let listener: TcpListener = TcpListener::bind(host).unwrap();
-    let h2_server = http2::server::Server::new(request_handler);
+    let h2_server = http2::Server::new(request_handler);
     let h1_server = http1_1::Server::new(request_handler);
 
     let args = Args::parse();
-    let protocol = if args.http1 { "HTTP/1.1 " } else { "HTTP/2" };
+    let protocol = if args.http1 { "HTTP/1.1" } else { "HTTP/2" };
     println!("{protocol} Server started on {host}");
 
     // Start a TLS server that waits for incoming connections.
     for stream in listener.incoming() {
         let stream: TcpStream = stream.unwrap();
-
+        println!("new connection in main");
         if args.http1 {
             h1_server.handle_connection(stream);
         } else {
