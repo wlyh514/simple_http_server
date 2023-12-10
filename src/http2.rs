@@ -1,7 +1,7 @@
-pub mod connection;
+mod connection;
 mod error;
-pub mod frames;
-pub mod server;
+mod frames;
+mod server;
 mod settings;
 mod stream;
 mod window;

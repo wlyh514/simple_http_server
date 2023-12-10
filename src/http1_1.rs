@@ -127,6 +127,7 @@ fn serialize_res(res: &HTTPResponse) -> Bytes {
     buf.extend(format!("{status_line}\r\n{headers_string}\r\n").bytes());
     if let Some(body_bytes) = &res.body {
         buf.extend_from_slice(&body_bytes);
+        buf.extend("\r\n".bytes());
     }
 
     buf.into()

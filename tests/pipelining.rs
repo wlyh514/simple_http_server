@@ -24,7 +24,11 @@ mod tests {
     }
     fn listen_to_response(stream: TcpStream, signal_tx: Sender<RespListenerSignal>) {
         let buf_reader = BufReader::new(stream);
-        for line in buf_reader.lines().map(|result| result.unwrap()) {
+        for line in buf_reader.lines() {
+            let line = match line {
+                Ok(line) => line,
+                Err(_) => break
+            };
             if line.starts_with("HTTP/1.1") {
                 println!("Response Received");
                 signal_tx.send(RespListenerSignal::NewResp).unwrap();
@@ -32,7 +36,7 @@ mod tests {
             println!("{line}");
         }
         println!("Connection closed");
-        signal_tx.send(RespListenerSignal::Stop).unwrap();
+        let _ = signal_tx.send(RespListenerSignal::Stop);
     }
 
     #[test]

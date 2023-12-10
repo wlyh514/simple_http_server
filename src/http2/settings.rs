@@ -87,12 +87,6 @@ impl SettingsMap {
         self.0.get(&(identifier as u16)).map(|val| *val)
     }
 
-    pub fn update(&mut self, other: Self) {
-        for (key, val) in other.0 {
-            self.0.insert(key, val);
-        }
-    }
-
     pub fn update_with_vec(&mut self, other: &Vec<SettingParam>) -> Result<(), ErrorCode> {
         for setting in other {
             self.set(setting.identifier.clone(), setting.value)?;
