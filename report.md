@@ -1,634 +1,129 @@
-# Project Report
+Project Report
 
-## Description of Project
+This is an implementation of HTTP/1.1 and HTTP/2 server. Emphasizing on HTTP/2 and adhering to the [RFC7540](https://httpwg.org/specs/rfc7540.html) standard. Implemented feaures includes:
 
-This project is a HTTP server written in the Rust programming language. It follows the [HTTP/1.1](https://httpwg.org/specs/rfc9112.html)
-and [HTTP/2](https://httpwg.org/specs/rfc9113.html) standards. The server is able to handle multiple requests at once using multi-threading.
+- HTTP/1.1:
+  - Barebone HTTP message serialization and deserialization
+  - Pipelining
+- HTTP/2:
+  - Multiplexing
+  - Maintaining Connections, Streams and Frames
+  - Client side flow-control
+  - Error handling
+  - Converting HTTP messages into/from HTTP/2 frames
+  - ...any other mandatory feature for the server as described in [RFC7540](https://httpwg.org/specs/rfc7540.html), other than server pushing and prioritization.
+- HTTP:
+  - A simplistic express-like API for describing endpoints.
 
-### Goals
+External libraries are used for managing transport-layer connection and hpack ([RFC7541](https://httpwg.org/specs/rfc7541.html)).
 
-- Implement TCP to transfer information.
-  - Server should listen to TCP connections.
-  - Server should receive information from said connections.
-- Implement HTTP/1.1 protocol.
-  - Server should recognize HTTP requests and process a HTTP response.
-  - Implement multi-threading to allow the web server to process multiple requests at once.
-    - Decide which technique to use (thread pool, async I/O model etc.)
-    - For example, if we use a thread pool, we could assign a thread to a single HTTP request.
-- Graceful error handling
-  - Errors should generally not be able to crash the web server.
-  - Record errors.
-    - HTTP error codes
-- (Time permitting) Implement WebSocket for live data broadcasting.
-- (Time permitting) Implement TLS to create an encrypted connection for HTTP communication, essentially HTTPS.
+[Video demonstration](https://www.youtube.com/watch?v=RpVLl11ABeE)
 
 ## Team Member Contributions
 
+### Siyang Chen
+
+Designed the overall architecture. Implemented most of the HTTP/1.1 and HTTP/2 features.
+
 ### Glenn Ye
 
-I worked on creating helper functions for compressing and decompressing headers
-using the HPACK algorithm, along with the relevant unit tests. I also contributed
-in our attempt to integrate TLS by creating a server certificate configuration and
-allowing the server to detect and respond to a client TLS handshake. Lastly, I worked
-on the project documentation, which I included in this report.
+I worked on creating helper functions for compressing and decompressing headers using the HPACK algorithm, along with the relevant unit tests. I also contributed in our attemp to integrate TLS by creating a server certificate configuration and allowing the server to detect and respond to a client TLS handshake.
 
 ### Ali Abdoli
 
 I worked on creating a simpler API for interacting with the response object. Allowing reponse.set similar to the node express implementation.
 
-## How to Run and Test the Project
+## Running and Testing
 
-### HTTP/1.1 Pipelining
+### Prerequisite
 
-In the project root, run:
+Rust is required to compile and run this project. Installation guide: [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install).
 
-```bash
-cargo run -- --http1
-cargo test pipelining
-```
+### HTTP/1.1
 
-### HTTP/1.1 Requests
+Start the HTTP/1.1 server using `cargo run -- --http1`.
 
-In the project root, run:
+#### Basic Functionalities
 
-```bash
-cargo run -- --http1
-```
+Open `http://localhost:7878` in a browser. A welcoming page with blue background should be rendered. In the source tab of DevTools you should see `css/index.css` and `js/index.js` loaded under `localhost:7878`.
 
-Then in another terminal, run:
+Run `curl http://localhost:7878/js/index.js`, a piece of javascript code should be returned in the response.
 
-```bash
-curl http://localhost:7878
-curl http://localhost:7878/slow # this should return after 10 seconds
-curl http://localhost:7878/this/does/not/exist # this should return 404
-curl http://localhost:7878/ping # this should return request header fields
-```
+Run `curl http://localhost:7878/ping`, the list of request headers should be returned in the response.
 
-Running `http://localhost:7878/` should also return an `index.html` page.
+Run `curl http://localhost:7878/slow`, this should return `"Resouce loaded after a while."` after 10 seconds.
+
+#### Pipelining
+
+With the HTTP/1.1 server running. In another terminal, run `cargo test pipelining`. This runs the pipelining test in the file `test/pipelining.rs`. This test should pass without error or panicing.
 
 ### HTTP/2
 
-1. Download [h2specs binary](https://github.com/summerwind/h2spec).
-2. In the project root, run: `cargo run`.
-3. In the folder where you downloaded the h2specs binary, run: `./h2spec http2 -p 7878 -h localhost --strict`.
+Start the HTTP/2 server using `cargo run -- --http2`. Make sure no other processes are occupying TCP port 7878.
 
-### HTTP/2 Request
+#### h2spec
 
-In the project root, run:
+[h2spec](https://github.com/summerwind/h2spec) is a testing tool for HTTP/2 implementations. It compares the implementation's behavious with expectations from [RFC7540](https://httpwg.org/specs/rfc7540.html). Download the binary for your testing platform.
 
-```bash
-cargo run
+Run `./h2spec http2 -p 7878 -h localhost --strict`. This runs HTTP/2 tests on localhost port 7878 with strict mode. The following should be present at the end of the program output:
+
+```
+Finished in ____ seconds
+95 tests, 95 passed, 0 skipped, 0 failed
 ```
 
-Then in another terminal, run:
+A sample testing output can be found [here](./test_results.txt).
 
-```bash
-curl --http2-prior-knowledge http://localhost:7878
-```
+#### curl
 
-**Note: `--http2-prior-knowledge` is not implemented by the curl library in Windows, but it should be on a Mac or Linux machine.**
+We do not have TLS integrated into this implementation, therefore the `--http2-prior-knowledge` flag is required for testing. We noticed that this flag is not supported by some Windows `curl` implementations, therefore it is recommended to curl the HTTP/2 server on a Linux or MacOS machine. All the curl testings in HTTP/1.1 (with `--http2-prior-knowledge` flag added) should yield the same result as in HTTP/1.1 testings. Additionally, `curl http://localhost:7878/ping` should include pseudo-headers `:path`, `:method`, `:authority` and `:scheme`.
 
-## Implementation Details
+## Project Overview
 
-### src/main.rs
+`main.rs`: Entry point of the server. Defines endpoints and listens to TCP connections.
 
-#### `fn request_handler(req: http::HTTPRequest) -> http::HTTPResponse`
+`http.rs`: Definition of HTTP reequest, response, headers, handler functions etc. Both HTTP/1.1 and HTTP/2 servers depends on this module. This module is not responsible for any server-specific implementations.
 
-Handles a request by generating a HTTP response, consisting of a status code,
-headers, and a body. The response is then returned to the caller.
+`http1.rs`: HTTP/1.1 implementation. Responsible for serialization and deserialization of HTTP/1.1 messages, as well as maintaining the multithreaded execution of request handlers.
 
-#### `fn main()`
+`http2.rs`: Module file for the http2 module, exposes only the `Server` struct to the user.
 
-Following a common programming convention, this function is the entry point of the
-program. It initializes an address for the HTTP server to listen on
-(`localhost:7878`) and a TCP listener to listen for incoming TCP packets that
-represent clients wanting to connect to the server. Then for each incoming
-connection, we use an instance of the HTTP server we implemented to handle the
-connection.
+- `http2/server.rs`: Definition of HTTP/2 servers, owns a handler function and a connection counter, create a new thread for each incomming connection.
+- `http2/connection.rs`: Implementation of HTTP/2 connections. Responsible for all network-level operations.
+- `http2/stream.rs`: Implementation of HTTP/2 streams ([RFC7540 Section 5](https://httpwg.org/specs/rfc7540.html#StreamsLayer)). Each stream maintains its stream state machine (Section 5.1), the stream-level client flow-control window (5.2) and its process of assembling a request from frames (Section 8). This module does not directly interact with transport layer streams.
+- `http2/frames.rs`: Definition of HTTP/2 frames ([RFC7540 Section 4, 6](https://httpwg.org/specs/rfc7540.html#FramingLayer)). Implements serialization and deserialization of frames.
+- `http2/window.rs`: Implementation of HTTP/2 connection/stream level flow-control window ([RFC7540 Section 5.2](https://httpwg.org/specs/rfc7540.html#FlowControl)). A window struct keeps track of how much peer window size is left, and generates flow-controlled frames if the peer is capable of receiving it.
+- `http2/error.rs`: Definition of HTTP/2 error codes ([RFC7540 Section 7](https://httpwg.org/specs/rfc7540.html#ErrorCodes)) and relevant utility data structures.
+- `http2/settings.rs`: Definition of HTTP/2 stream/connection settings ([RFC7540 Section 6.5](https://httpwg.org/specs/rfc7540.html#ErrorCodes)) and relevant untility data structures.
 
-### src/http.rs
+`tls.rs`: TLS utilities, handles server keys and configurations. This is not used in the final version since we did not have TLS integrated properly with HTTP/2. See the Remarks section.
 
-#### `pub enum HeaderVal`
+## Detailed Documentation
 
-A header value, which can be either a string or a list of strings.
+Detailed documentation of the code can be found [here](./DOC.md).
 
-#### `pub fn as_bytes(&self) -> Bytes`
+## Remarks
 
-Converts a header value into bytes.
+### Limitations
 
-#### `pub type HeadersMap = HashMap<String, HeaderVal>`
+The following features are missing
 
-A list of headers. Each header conssits of a header name and a header value(s).
+- TLS: We tried to integrate TLS into our project, however sharing the TLS stream over two synchronous threads was way more complicated than we original anticipated. We had to compromise a large portion of our codebase and were constantly bugged by deadlocks and other synchronization issues, even with the help of Rust's concurrrency constructs. Therefore we decided to not support TLS.
+- Server Push: We decided not to use server push because it is not commonly supported, read more in [this blog post](https://developer.chrome.com/blog/removing-push).
+- Prioritization: We decided this is an optional feature, and is only relavent when resources are scarce. This feature is not tested by h2spec.
+- Complexed HTTP header semantics ([RFC9110](https://httpwg.org/specs/rfc9110.html)): There are a lot of different header semantics defined in RFC9110, supporting all of them will be too much work and is irrelevant to computer networking. We ended up treating header fields as simple string-to-string mappings.
+- Implmentation of HPACK: We used a library to handle HTTP/2 header compression/decompression. Originally we intended to implement it from scratch, but then found it to be too complicated and not really relevant to the course materials. We wasted several hours on this.
 
-#### `pub fn hdr_map_size(hdr_map: &HeadersMap) -> usize`
+### Lessons Learned
 
-Given an uncompressed list of headers generated by the HTTP server, calculate
-the size of the list in bytes.
+#### Use async programming in future network projects
 
-#### `pub trait ReqHandlerFn: Fn(HTTPRequest, &mut HTTPResponse) -> () + Sync + Send {}`
+Async frameworks reduces the overhead of spawning threads, and allows us to split a stream into a read-half and a write-half. This could drastically reduce the difficulty of integrating TLS.
 
-This defines a HTTP request handler that can be called by multiple threads at
-the same time.
+#### Decouple network handling and protocol logic
 
-#### `pub struct HTTPRequest`
+We ended up having a bloated `http2/connection.rs` partially because it is both responsible for communicating with the underlying TCP stream, and maintaining the HTTP/2 connection states. The code can be cleaner if we decoupled the two beforehand.
 
-A HTTP request, consisting of a method, path, protocol, headers, body, and trailers.
+#### Make sure to understand all requirements before designing the architecture
 
-#### `pub fn new(method: &str, path: &str, protocol: &str) -> Self`
-
-Creates a new HTTP request with the given method, path, and protocol.
-
-#### `pub struct HTTPResponse`
-
-A HTTP response, consisting of a status code, headers, body, and trailers.
-
-#### `pub fn default() -> Self`
-
-Creates the default HTTP response, which is an empty 200 OK response.
-
-#### `pub fn set(&mut self, field: &str, value: &str)`
-
-Inserts a header with singular value into the HTTP response.
-
-#### `pub fn set_multiple(&mut self, values: HashMap<&str, &str>)`
-
-Inserts a header with multiple values into the HTTP response.
-
-#### `pub fn file(&mut self, fp: &str)`
-
-Inserts file content into the HTTP response body.
-
-#### `pub fn status(&mut self, status: ResponseStatus)`
-
-Sets the status code of the HTTP response.
-
-#### `pub fn text(&mut self, text: String)`
-
-Inserts text into the HTTP response body.
-
-#### `pub fn bytes(&mut self, body: Bytes)`
-
-Populate the HTTP response body with bytes data.
-
-#### `pub enum ResponseStatus`
-
-All supported HTTP response status codes.
-
-#### (Test Case) `fn find_uncompressed_header_list_size_correctly()`
-
-Tests that the function `hdr_map_size` correctly calculates the size of an
-uncompressed header list.
-
-### src/http1_1.rs
-
-#### `type ResponseQueue`
-
-This is a queue of threads that the server generates to handle each individual 
-request (i.e. process a response).
-
-#### `enum RespHandlerSignal`
-
-This acts as a signal for the spawned request handling threads. `NewResp` means
-that the thread should generate a response and `Finished` means that the thread is
-finished processing the request.
-
-#### `pub struct Server<T: ReqHandlerFn + Copy + 'static>`
-
-A HTTP/1.1 server, consisting of a request handler.
-
-#### `pub fn new(handler: T) -> Self`
-
-Creates a new HTTP/1.1 server with the given request handler.
-
-#### `fn handle_connection(stream: TcpStream)` and `fn _handle_connection(stream: TcpStream, handler: T)`
-
-This function handles an incoming connection by parsing the TCP stream to get the
-HTTP request. Then it spawns two new threads: one to handle the request by
-generating a response and one to send the response. Once this is done, the spawned
-thread signals that it has finished processing the request.
-
-#### `fn handle_request(http_request: Vec<String>, resp_signal_tx: Sender<RespHandlerSignal>) -> String`
-
-Processes the HTTP request and generates a response. Then it signals the
-corresponding response thread to send the response.
-
-#### `fn deserialize_req(lines: &Vec<String>) -> HTTPRequest`
-
-Parses a list of strings into a HTTP request object so that it can be processed by 
-the server.
-
-#### `fn serialize_res(res: &HTTPResponse) -> Bytes`
-
-Converts a HTTP response object into a list of bytes so that it can be sent to the
-client via the TCP stream.
-
-#### `fn headers_to_string(headers: &HeadersMap) -> String`
-
-Converts a list of headers into a single continuous string.
-
-#### `fn status_to_string(status: &ResponseStatus) -> String`
-
-Converts a HTTP response status code into a string.
-
-#### `fn handle_response(response_queue: Arc<Mutex<ResponseQueue>>,mut stream:TcpStream, resp_signal_rx: Receiver<RespHandlerSignal>,)`
-
-If the thread receives a `NewResp` signal, it sends the generated response to the
-TCP stream for the client to receive. If the thread receives a `Finished` signal,
-it exits.
-
-### src/http2.rs
-
-#### `pub type Server<T>`
-
-A HTTP/2 server.
-
-### src/tls.rs
-
-#### `fn load_certificates(filename: &str) -> Vec<CertificateDer<'static>>`
-
-Loads the server PEM certificate from the given file, and converts it into a
-DER certificate.
-
-#### `fn load_private_key(filename: &str) -> PrivateKeyDer<'static>`
-
-Loads the server PEM private key from the given file, and converts it into a
-DER private key. The PEM private key must be either from a PKCS #1, PKCS #8, or
-SEC #1 cryptography standard.
-
-#### `fn config_tls() -> Arc<ServerConfig>`
-
-Configures the TLS server by loading the server certificate and private key.
-
-#### `pub fn choose_tls_config(_client_hello: ClientHello) -> Arc<ServerConfig>`
-
-Chooses the TLS configuration for the server. Currently only the default 
-configuration specified by `config_tls` is supported.
-
-### src/http2/connection.rs
-
-#### `enum ResponseQueueError`
-
-A response queue error. Currrently it only specifies that it terminated for some
-reason.
-
-#### `struct ResponseQueueRx(mpsc::Receiver<Frame>)`
-
-A response queue receiver, which is used to receive frames from the response.
-
-#### `pub fn new(rx: mpsc::Receiver<Frame>) -> Self`
-
-Creates a new response queue receiver.
-
-#### `pub fn pop(&self) -> Result<Frame, ResponseQueueError>`
-
-Pops a frame from the response queue.
-
-#### `struct ResponseQueueTx(mpsc::Sender<Frame>)`
-
-A response queue sender, which is used to send frames to the response.
-
-#### `pub fn new(tx: mpsc::Sender<Frame>) -> Self`
-
-Creates a new response queue sender.
-
-#### `pub fn push(&self, frame: Frame)`
-
-Pushes a frame to the response queue.
-
-#### `pub struct Connection<T: ReqHandlerFn + Copy>`
-
-A HTTP/2 connection, consisting of a request handler, client and server settings,
-and data streams between client and server.
-
-#### `pub fn new(handler: T, server_settings: SettingsMap, peer_settings_params: Vec<SettingParam>, id: usize) -> Connection<T>`
-
-Creates a new HTTP/2 connection with the given request handler and settings.
-
-#### `fn get_window_size(&self) -> u32`
-
-Gets the buffering capacity of the connection on the end of the server for
-dataframes associated with the stream(s).
-
-#### `fn set_window_size(&self, size: u32)`
-
-Sets the buffering capacity of the server's streams associated with this connection.
-
-#### `fn new_stream(&self, new_stream_id: u32)`
-
-Creates a new stream with the given stream ID. Before the stream is created, close
-any existing streams with smaller stream IDs that are associated with this
-connection.
-
-#### `fn make_header_frames(&self, stream_id: u32, response: &mut HTTPResponse) -> Result<Vec<Frame>, ()>`
-
-Conmpresses the headers of the given HTTP response using HPACK. Then
-splits the compressed headers into multiple header frames.
-
-#### `fn send_frame(&self, frame: Frame, tcp_writer: &mut BufWriter<TcpStream>) -> Result<(), ()>`
-
-Sends a frame to the client via the TCP stream.
-
-#### `fn handle_request(&self, req: HTTPRequest, stream_id: u32, queue_tx: ResponseQueueTx)`
-
-Handles a HTTP request by generating a HTTP response and splitting
-it into multiple frames before sending them to the client via the
-given TCP stream.
-
-#### `fn handle_frame(&self, frame: &Frame) -> Result<Option<Frame>, ErrorCode>`
-
-Handles a given HTTP/2 frame based on its type `FrameBody`. The
-main purpose of this handler is to detect any malformed frames and
-throw the proper error if one is detected.
-
-`FrameBody::Data` refers to HTTP payload data frames, `FrameBody::Headers` are namely header frames, `FrameBody::Priority` are priority frames specifying stream priority, `FrameBody::RSTStream` are reset stream frames for suddenly closing a connection, `FrameBody::Settings` are HTTP/2 connection settings frames, `FrameBody::PushPromise` are push promise frames for transferring resources to the client but are currently disabled in this implementation, `FrameBody::Ping` are ping frames for measuring round-trip time in the connection, `FrameBody::GoAway` are frames that initiate a graceful shutdown of the connection (as opposed to `FrameBody::RSTStream`), `FrameBody::WindowUpdate` are frames connection flow control settings, and `FrameBody::Continuation` are continuation frames for header frames which are sent in fragments.
-
-#### `fn run_rx(connection: Arc<Self>, queue_tx: ResponseQueueTx, mut tcp_reader: BufReader<TcpStream>)`
-
-Handles a HTTP/2 connection by reading it frame by frame. Closes the
-connection if the wrong frame is received. If a valid request-related
-frame is received, it is sent to the request handler to generate a
-response. If a settings-related frame is received, modify the 
-current connection directly.
-
-#### `fn run_tx(connection: Arc<Self>, queue_rx: ResponseQueueRx, mut tcp_writer: BufWriter<TcpStream>,)`
-
-Sends a given frame to the client via the TCP stream.
-
-#### `fn close_with_error(&self,error_code: ErrorCode,last_stream_id: u32, queue_tx: ResponseQueueTx)`
-
-Closes the connection with the given error code and last stream ID.
-
-#### `pub fn run(self, tcp_reader: BufReader<TcpStream>,tcp_writer: BufWriter<TcpStream>)`
-
-Runs the HTTP/2 connection by spawning two queue threads: one to handle
-incoming frames and one to send outgoing frames.
-
-### src/http2/error.rs
-
-#### `pub enum ErrorCode`
-
-A HTTP/2 error code.
-
-### src/http2/frames.rs
-
-#### `pub struct FrameHeader`
-
-A HTTP/2 frame header, consisting of a length, type, flags, and stream ID.
-
-#### `fn put_buf(&self, buf: &mut BytesMut)`
-
-Writes the frame header to the given buffer.
-
-#### `fn try_from(mut buf: Bytes) -> Result<Self, Self::Error>`
-
-Converts a list of bytes into a frame header.
-
-#### `pub struct HeadersBodyPriority`
-
-Stores info regarding a frame's prioroty.
-
-#### `pub enum FrameBody`
-
-A HTTP/2 frame body containing data based on its type.
-
-#### `fn get_id(&self) -> u8`
-
-Gets the frame type ID of the given frame.
-
-#### `pub fn size(&self) -> usize`
-
-Gets the size of the given frame in bytes.
-
-#### `fn try_put_buf(&self, buf: &mut BytesMut) -> Result<(), &'static str>`
-
-Writes the frame body to the given buffer.
-
-#### `fn try_from_buf(mut buf: Bytes, hdr: &FrameHeader) -> Result<Self, error::BodyDeserializationError>`
-
-Converts a list of bytes into a frame body (serializes it).
-
-#### `pub struct Frame`
-
-A HTTP/2 frame, consisting of a header and body.
-
-#### `pub fn new(stream_id: u32, flags: u8, payload: FrameBody) -> Self`
-
-Creates a new HTTP/2 frame with the given stream ID, flags, and payload
-which then populates the header and body.
-
-#### `pub fn is_valid(&self) -> Result<(), &'static str>`
-
-Checks if a frame is the correct size.
-
-#### `pub fn try_read_from_buf(buf_reader: &mut BufReader<TcpStream>) -> Result<Frame, error::DeserializationError>`
-
-Reads a frame from the given TCP stream (deserializes it).
-
-#### `fn try_into(self) -> Result<Bytes, Self::Error>`
-
-Converts a frame into a list of bytes.
-
-#### `pub enum HeaderDeserializationError`
-
-A frame header deserialization error.
-
-#### `pub enum BodyDeserializationError`
-
-A frame header body deserialization error.
-
-#### `pub enum DeserializationError`
-
-A frame deserialization error.
-
-### src/http2/server.rs
-
-#### `pub struct Server<T: ReqHandlerFn + Copy + 'static>`
-
-A HTTP/2 server, consisting of a request handler and connection count.
-
-#### `pub fn new(handler: T) -> Self`
-
-Creates a new HTTP/2 server with the given request handler and a zero 
-connection count.
-
-#### `pub fn handle_connection(&self, stream: TcpStream)` and `fn _handle_connection(connection_id: usize, stream: TcpStream, handler: T) -> Option<()>`
-
-Handles a HTTP/2 connection by spawning a new thread to handle the connection. Then in the thread, initiate the HTTP/2 connection
-by sending a settings frame to the client followed by an acknowledgement
-frame.
-
-### src/http2/settings.rs
-
-#### `pub enum SettingsIdentifier`
-
-A HTTP/2 settings list.
-
-#### `pub fn is_valid_value(&self, value: u32) -> Result<u32, ErrorCode>`
-
-Checks if a given setting ID is valid.
-
-#### `pub struct SettingsMap(HashMap<u16, u32>)`
-
-A HTTP/2 settings map, consisting of a list of settings.
-
-#### `pub fn default() -> Self`
-
-Creates a new HTTP/2 settings map with the default settings.
-
-#### `pub fn set(&mut self, identifier: SettingsIdentifier, value: u32) -> Result<(), ErrorCode>`
-
-Sets a given setting ID to a given value.
-
-#### `pub fn get(&self, identifier: SettingsIdentifier) -> Option<u32>`
-
-Gets the value of a given setting ID.
-
-#### `pub fn update(&mut self, other: Self)`
-
-Updates the current settings map with the given settings map.
-
-#### `pub fn update_with_vec(&mut self, other: &Vec<SettingParam>) -> Result<(), ErrorCode>`
-
-Updates the current settings map with the given settings vector.
-
-#### `fn from(params: Vec<SettingParam>) -> Self`
-
-Converts a list of parameters into a settings map.
-
-#### `fn into(self) -> Vec<SettingParam>`
-
-Converts a settings map into a list of parameters.
-
-#### `pub struct SettingParam `
-
-a singular HTTP/2 setting, consisting of an ID and value.
-
-### src/http2/stream.rs
-
-#### `pub enum ReqAssemblerState`
-
-A HTTP/2 request assembler state.
-
-#### `struct ReqAssembler`
-
-A HTTP/2 request assembler to build a request out of multiple frames.
-
-#### `pub fn new() -> Self`
-
-Creates a new HTTP/2 request assembler.
-
-#### `pub fn recv_frame(&mut self, frame: Frame) -> Result<(), ()>`
-
-Receives a frame and processes it depending on type.
-
-#### `pub fn assemble(&mut self) -> Result<HTTPRequest, ErrorCode>`
-
-Assembles a HTTP request from the received frames.
-
-#### `pub struct Stream`
-
-A HTTP/2 stream.
-
-#### `pub enum StreamState`
-
-Defines the state of a HTTP/2 stream.
-
-#### `pub fn is_active(&self) -> bool`
-
-Checks if the stream is active.
-
-#### `pub fn new(id: u32, peer_settings: Arc<Mutex<SettingsMap>>) -> Stream`
-
-Creates a new HTTP/2 stream with the given stream ID and peer settings.
-
-#### `pub fn get_req_assembler_state(&self) -> &ReqAssemblerState`
-
-Gets the state of the request assembler.
-
-#### `pub fn recv(&mut self, frame: Frame) -> Result<Option<HTTPRequest>, ErrorCode>`
-
-Receives a frame from the stream and processes it depending on type. Also 
-update the stream state.
-
-#### `pub fn send(&mut self, frame: &Frame)`
-
-Sends a frame to the stream. Also update the stream state.
-
-#### `pub fn push_data(&mut self, data: Bytes)`
-
-Pushes data to the stream.
-
-#### `pub fn get_ready_data_frames(&mut self) -> Option<Vec<Frame>>`
-
-Gets the data frames that are ready to be sent.
-
-#### `pub fn window_update(&mut self, increment: i64) -> Result<bool, ()>`
-
-Updates the stream's window size by the given increment.
-
-#### `fn hdr_field_try_get_single_val(hdr_map: &HeadersMap,field_name: &str,) -> Result<String, ErrorCode>`
-
-Gets the value of a header with a singular value.
-
-#### `pub fn compress_header(hdrs: &HeadersMap) -> Bytes`
-
-Compresses the given headers using HPACK.
-
-#### `pub fn decompress_header(bytes: &[u8]) -> Result<HeadersMap, ErrorCode>`
-
-Decompresses the given bytes using HPACK.
-
-#### (Test Case) `fn compress_header_correctly()`
-
-Tests that the function `compress_header` correctly compresses a list of headers.
-
-#### (Test Case) `fn decompress_header_correctly()`
-
-Tests that the function `decompress_header` correctly decompresses a list of headers.
-
-### src/http2/window.rs
-
-#### `pub struct Window`
-
-HTTP/2 connection window.
-
-#### `pub fn new(size: i64) -> Window`
-
-Creates a new HTTP/2 connection window with the given size.
-
-#### `pub fn window_update(&mut self, increment: i64) -> Result<bool, ()>`
-
-Updates the window size by the given increment.
-
-#### `pub fn push_data(&mut self, data: Bytes) -> Result<(), ()>`
-
-Pushes data to the window.
-
-#### `pub fn make_data_frames(&mut self, max_frame_size: usize, stream_id: u32) -> Option<Vec<Frame>>`
-
-Creates frames from the window's data buffer.
-
-## Commentary
-
-### HPACK Implementation
-
-Initially we tried to implement HPACK from scratch, but we ran into some difficulties with achieving that.
-From the [RFC 7541](https://httpwg.org/specs/rfc7541.html) specification, we spent more time than we initially
-planned just going through the document and trying to understand what it meant. One thing we got stuck on was trying
-to implement the dynamic table which stored the headers. There were multiple stated scenarios where we would have to
-insert and evict headers from the table, which we could not fully figure out the implementation of. In the end, we resorted to
-using the [hpack](https://crates.io/crates/hpack) crate to implement HPACK. This made the implementation
-significantly easier because now we could just deal with a set of compressed/uncompressed headers and then
-treat the crate as a black box to convert between the two specified compression states.
-
-### WebSockets
-
-We ended up not having enough time to tackle this goal.
-
-## Concluding Remarks
-
-Overall we are satisfied with the HTTP server implementation we achieved, even though wanted to implement more features from
-scratched as mentioned above. Trying to code something from a specification is a lot more difficult than we initially thought,
-even though it seemed similar to writing code based on a school assignment, which we have done plenty of times in university.
-The details of the specification were simply more complicated that we anticipated, which caused us to underestimate the scope
-of our goals.
+We underestimated the complexity of maintaining flow-control windows, and spent quite a while to integrate it into our project. This also contributes to a bloated `connection.rs`.
