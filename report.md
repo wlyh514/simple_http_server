@@ -613,7 +613,7 @@ Creates frames from the window's data buffer.
 ### HPACK Implementation
 
 Initially we tried to implement HPACK from scratch, but we ran into some difficulties with achieving that.
-From the [RFC 7541](https://httpwg.org/specs/rfc7541.html) specification, we spent more time than we intially
+From the [RFC 7541](https://httpwg.org/specs/rfc7541.html) specification, we spent more time than we initially
 planned just going through the document and trying to understand what it meant. One thing we got stuck on was trying
 to implement the dynamic table which stored the headers. There were multiple stated scenarios where we would have to
 insert and evict headers from the table, which we could not fully figure out the implementation of. In the end, we resorted to
