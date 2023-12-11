@@ -19,7 +19,7 @@ fn request_handler(req: http::HTTPRequest, res: &mut http::HTTPResponse) {
         (_, "/slow") => {
             // Simulate long processing time
             thread::sleep(Duration::from_secs(10));
-            res.text(String::from("Resouce loaded after a while. "));
+            res.text(String::from("Resource loaded after a while. "));
         }
         ("GET", "/ping") => {
             res.text(format!("{:#?}", req.headers));
@@ -58,7 +58,6 @@ fn main() {
     // Start a TLS server that waits for incoming connections.
     for stream in listener.incoming() {
         let stream: TcpStream = stream.unwrap();
-        println!("new connection in main");
         if args.http1 {
             h1_server.handle_connection(stream);
         } else {

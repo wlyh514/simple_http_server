@@ -641,10 +641,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     Err(err) => {
                         // Close connection if connection error
                         match err {
-                            // ErrorCode::StreamClosed => {
-                            //     queue_tx.push(Frame::new(stream_id, 0, FrameBody::RstStream { error_code: ErrorCode::StreamClosed }));
-                            //     println!("STREAM_CLOSED queued");
-                            // },
                             e => {
                                 println!("Error occurred while updating the stream state machine.");
                                 connection.close_with_error(e, stream_id, queue_tx);
@@ -691,7 +687,6 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
 
                 if stream.state == StreamState::Closed {
                     println!("Stream {} closed. ", stream.id);
-                    // connection.streams.lock().unwrap().remove(&stream.id);
                 }
             }
         }
@@ -710,22 +705,8 @@ impl<T: ReqHandlerFn + Copy + 'static> Connection<T> {
                     break;
                 }
             };
-
-            // Connection level flow control
-            // if let FrameBody::Data{ .. } = frame.payload {
-            //     let available_size = connection.get_window_size();
-            //     let payload_size = frame.payload.size(); // Make it pub!
-            //     while payload_size > available_size as usize {
-            //         thread::park();
-            //         let available_size = connection.get_window_size();
-            //     }
-            // }
-
             let _ = connection.send_frame(frame, &mut tcp_writer);
         }
-
-        // Close stream 0
-        // let _ = connection.send_frame(Frame::new(0, 0, FrameBody::RstStream { error_code: ErrorCode::NoError }), &mut tcp_writer);
     }
 
     fn close_with_error(

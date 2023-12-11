@@ -156,7 +156,6 @@ impl ReqAssembler {
             ReqAssemblerState::Done => {
                 let headers =
                     decompress_header(&self.hdr_block).map_err(|_| ErrorCode::CompressionError)?;
-                // println!("Header decompressed");
                 dbg!(&headers);
 
                 let body: Option<Bytes> = match self.body.len() {
@@ -178,7 +177,6 @@ impl ReqAssembler {
                 if path.is_empty() {
                     return Err(ErrorCode::ProtocolError);
                 }
-                // println!("Request pseudo header check passed");
 
                 let known_pseudo_hdrs = [":method", ":scheme", ":path", ":authority"];
                 // Section 8.1.2
@@ -199,7 +197,6 @@ impl ReqAssembler {
                         return Err(ErrorCode::ProtocolError);
                     }
                 }
-                // println!("Request header fields check passed");
 
                 // Validate content-length
                 if let Some(content_length) = headers.get("content-length") {
@@ -215,7 +212,6 @@ impl ReqAssembler {
                         _ => return Err(ErrorCode::ProtocolError),
                     }
                 }
-                // println!("Conent-Length check passed");
 
                 // Ensure pseudo headers do not exist in trailers
                 if let Some(trailers) = &trailers {
@@ -225,7 +221,6 @@ impl ReqAssembler {
                         }
                     }
                 }
-                // println!("Trailers check passed");
 
                 let mut req = HTTPRequest::new(method.as_str(), path.as_str(), "HTTP/2");
                 req.headers = headers;
@@ -500,7 +495,6 @@ pub fn compress_header(hdrs: &HeadersMap) -> Bytes {
         .collect();
     header_vec.sort();
     return Bytes::from(encoder.encode(header_vec.iter().map(|h| (&h.0[..], &h.1[..]))));
-    // Bytes::from(encoder.encode(hdrs.iter().map(|(k, v)| (k.as_bytes(), v.as_bytes()))))
 }
 
 /// Decompress headers using HPACK.
