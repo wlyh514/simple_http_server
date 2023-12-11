@@ -2,19 +2,88 @@
 
 ## Description of Project
 
+
+### Goals
+
+- Implement TCP to transfer information.
+  - Server should listen to TCP connections.
+  - Server should receive information from said connections.
+- Implement HTTP/1.1 protocol.
+  - Server should recognize HTTP requests and process a HTTP response.
+  - Implement multi-threading to allow the web server to process multiple requests at once.
+    - Decide which technique to use (thread pool, async I/O model etc.)
+    - For example, if we use a thread pool, we could assign a thread to a single HTTP request.
+- Graceful error handling
+  - Errors should generally not be able to crash the web server.
+  - Record errors.
+    - HTTP error codes
+- (Time permitting) Implement WebSocket for live data broadcasting.
+- (Time permitting) Implement TLS to create an encrypted connection for HTTP communication, essentially HTTPS.
+
 ## Team Member Contributions
 
 ### Glenn Ye
 
 I worked on creating helper functions for compressing and decompressing headers
 using the HPACK algorithm, along with the relevant unit tests. I also contributed
-in our attemp to integrate TLS by creating a server certificate configuration and
+in our attempt to integrate TLS by creating a server certificate configuration and
 allowing the server to detect and respond to a client TLS handshake.
 
 ### Ali Abdoli
+
 I worked on creating a simpler API for interacting with the response object. Allowing reponse.set similar to the node express implementation.
 
 ## How to Run and Test the Project
+
+### HTTP/1.1 Pipelining
+
+In the project root, run:
+
+```bash
+cargo run -- --http1
+cargo test pipelining
+```
+
+### HTTP/1.1 Requests
+
+In the project root, run:
+
+```bash
+cargo run -- --http1
+```
+
+Then in another terminal, run:
+
+```bash
+curl http://localhost:7878
+curl http://localhost:7878/slow # this should return after 10 seconds
+curl http://localhost:7878/this/does/not/exist # this should return 404
+curl http://localhost:7878/ping # this should return request header fields
+```
+
+Running `http://localhost:7878/` should also return an `index.html` page.
+
+### HTTP/2
+
+1. Download [h2specs binary](https://github.com/summerwind/h2spec).
+2. In the project root, run: `cargo run`.
+3. In the folder where you downloaded the h2specs binary, run: `./h2spec http2 -p 7878 -h localhost --strict`.
+
+### HTTP/2 Request
+
+In the project root, run:
+
+```bash
+cargo run
+```
+
+Then in another terminal, run:
+
+```bash
+curl --http2-prior-knowledge http://localhost:7878
+```
+
+**Note: `--http2-prior-knowledge` is not implemented by the curl library in Windows, but it should be on a Mac or Linux machine.**
 
 ## Implementation Details
 
@@ -538,4 +607,25 @@ Creates frames from the window's data buffer.
 
 ## Commentary
 
+### HPACK Implementation
+
+Initially we tried to implement HPACK from scratch, but we ran into some difficulties with achieving that.
+From the [RFC 7541](https://httpwg.org/specs/rfc7541.html) specification, we spent more time than we intially
+planned just going through the document and trying to understand what it meant. One thing we got stuck on was trying
+to implement the dynamic table which stored the headers. There were multiple stated scenarios where we would have to
+insert and evict headers from the table, which we could not fully figure out the implementation of. In the end, we resorted to
+using the [hpack](https://crates.io/crates/hpack) crate to implement HPACK. This made the implementation
+significantly easier because now we could just deal with a set of compressed/uncompressed headers and then
+treat the crate as a black box to convert between the two specified compression states.
+
+### WebSockets
+
+We ended up not having enough time to tackle this goal.
+
 ## Concluding Remarks
+
+Overall we are satisfied with the HTTP server implementation we achieved, even though wanted to implement more features from
+scratched as mentioned above. Trying to code something from a specification is a lot more difficult than we initially thought,
+even though it seemed similar to writing code based on a school assignment, which we have done plenty of times in university.
+The details of the specification were simply more complicated that we anticipated, which caused us to underestimate the scope
+of our goals.
