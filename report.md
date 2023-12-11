@@ -2,6 +2,8 @@
 
 ## Description of Project
 
+This project is a HTTP server written in the Rust programming language. It follows the [HTTP/1.1](https://httpwg.org/specs/rfc9112.html)
+and [HTTP/2](https://httpwg.org/specs/rfc9113.html) standards. The server is able to handle multiple requests at once using multi-threading.
 
 ### Goals
 
@@ -27,7 +29,8 @@
 I worked on creating helper functions for compressing and decompressing headers
 using the HPACK algorithm, along with the relevant unit tests. I also contributed
 in our attempt to integrate TLS by creating a server certificate configuration and
-allowing the server to detect and respond to a client TLS handshake.
+allowing the server to detect and respond to a client TLS handshake. Lastly, I worked
+on the project documentation, which I included in this report.
 
 ### Ali Abdoli
 
